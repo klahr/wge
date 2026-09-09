@@ -288,9 +288,22 @@ func (d *Docker) hostConfig() map[string]any {
 		// else. See multiUserCaps for why an empty set is the wrong answer.
 		"CapDrop": []string{"ALL"},
 		"CapAdd":  caps,
-		// A setuid binary inside must not be able to raise privilege beyond
-		// what the game intends.
-		"SecurityOpt": []string{"no-new-privileges"},
+		// no-new-privileges is deliberately NOT set.
+		//
+		// It is the reflex hardening flag for a container, and on a multi-user
+		// box it breaks the game. The flag makes the kernel ignore the setuid
+		// bit, so su(1) cannot become root to read /etc/shadow and fails with
+		// "Authentication failure", and sudo refuses to run at all. Moving
+		// between levels in a live session is exactly su, so the flag turns off
+		// the central mechanic.
+		//
+		// What it would have protected against is a player finding a setuid
+		// binary and becoming root inside the container. That is the game
+		// working as intended, and it is not a way out of the container -- the
+		// capability set is what stops that. The compensating control is the
+		// setuid audit in `wge test`, which proves the box carries exactly the
+		// setuid binaries the base image ships and nothing an author added by
+		// accident.
 		// No egress. An unfiltered shell box on the internet becomes someone
 		// else's spam relay within the week. Multi-host games attach a private
 		// per-run network instead of the default bridge.

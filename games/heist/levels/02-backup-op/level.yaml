@@ -1,5 +1,6 @@
 id: backup-op
 user: bkup
+host: relay2
 requires: [mailroom]
 
 grants:
@@ -14,8 +15,17 @@ grants:
 services:
   - name: backup-agent
     user: bkupd
-    unit: backup-agent.service
+    description: Ardent nightly backup agent
+    exec: /usr/local/lib/backup-agent/agent
     port: 8377
+
+cron:
+  - schedule: "17 2 * * *"
+    comment: stage last night's restore for review
+    command: /usr/local/bin/stage-nightly
+  - schedule: "40 6 * * *"
+    comment: retention -- keeps failing, see ticket ARD-4471
+    command: /usr/local/bin/prune-restores
 
 narrative:
   correspondents:

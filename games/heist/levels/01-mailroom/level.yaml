@@ -1,5 +1,6 @@
 id: mailroom
 user: jposti
+host: relay2
 # No prerequisites: this is where the player starts.
 requires: []
 

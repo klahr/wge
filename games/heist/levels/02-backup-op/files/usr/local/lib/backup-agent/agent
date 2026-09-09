@@ -1,0 +1,21 @@
+#!/bin/sh
+# Ardent backup agent.
+#
+# Reports status on the loopback port for the ops dashboard, and writes a
+# heartbeat so somebody can tell whether it is still alive.
+set -u
+
+PORT=8377
+INTERVAL=45
+
+# Status socket. One connection at a time is all the dashboard ever opens.
+while :; do
+	printf 'backup-agent ok\n' | nc -l 127.0.0.1 "$PORT" >/dev/null 2>&1 || sleep 1
+done &
+
+while :; do
+	printf '%s backup-agent[%s]: heartbeat, staging area %s\n' \
+		"$(date '+%Y-%m-%d %H:%M:%S')" "$$" \
+		"$(df -h /var/backups 2>/dev/null | awk 'NR==2 {print $5}')"
+	sleep "$INTERVAL"
+done

@@ -8,6 +8,11 @@ synopsis: >
 
 base: wge/debian-13
 
+hosts:
+  # The machine's name. Its own motd calls it "mail relay 2", so anything else
+  # would contradict the box on the first line a player reads.
+  - id: relay2
+
 packages:
   - postfix
   - sqlite3
@@ -16,9 +21,12 @@ packages:
   - tcpdump
 
 timeline:
-  # The fictional clock. Files are aged around this at build time; without it
-  # every mtime in the image is the build timestamp and the box reads as fake.
-  start: 2024-11-03T09:00:00Z
+  # No start date: the box's history is anchored to the build, so that its
+  # fictional present and the real present are the same moment. That matters
+  # because the box is alive -- cron fires, the backup agent writes its log --
+  # and those entries carry the real clock. Against a fixed date in the past
+  # they would all land months after the newest file on a carefully aged box.
+  span: 120d
 
 # Decoy accounts with their own mail, history and abandoned scripts. Four
 # levels and exactly four home directories would hand over the shape of the

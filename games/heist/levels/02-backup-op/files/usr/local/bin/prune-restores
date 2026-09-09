@@ -1,0 +1,12 @@
+#!/bin/sh
+# Retention. Removes staged restores older than 30 days.
+#
+# ARD-4471: this has never worked. The find below matches nothing because the
+# staging directories are named by backup date, not created on it, so their
+# mtimes are always recent. Nobody has looked at it.
+set -u
+
+find /var/backups -maxdepth 1 -name 'restore-*' -mtime +30 -exec rm -rf {} \; 2>/dev/null
+
+printf '%s prune-restores: retention pass complete\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+	>> /var/log/backup-agent.log 2>/dev/null

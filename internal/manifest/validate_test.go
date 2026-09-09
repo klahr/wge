@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"gopkg.in/yaml.v3"
 	"strings"
 	"testing"
 	"time"
@@ -155,10 +156,20 @@ func TestTwoLevelsCannotShareAnAccount(t *testing.T) {
 	mustFail(t, g, "both use the account")
 }
 
-func TestTimelineIsRequiredForAging(t *testing.T) {
+// An unset start is not a fault: it means the timeline is anchored to the
+// build, which is what a game wants unless it is deliberately a period piece.
+func TestTimelineMayBeRelative(t *testing.T) {
 	g := valid()
 	g.Timeline.Start = time.Time{}
-	mustFail(t, g, "timeline.start is required")
+	if err := g.Validate(); err != nil {
+		t.Fatalf("a build-anchored timeline should validate: %v", err)
+	}
+	if g.Timeline.Anchored() {
+		t.Error("Anchored() should be false when no start is set")
+	}
+
+	g.Timeline.Span = Duration(-1)
+	mustFail(t, g, "timeline.span cannot be negative")
 }
 
 func TestGrantMustSayWhereTheCredentialIs(t *testing.T) {
@@ -226,8 +237,8 @@ func TestInvalidIdentifiers(t *testing.T) {
 func TestErrorsAreAccumulated(t *testing.T) {
 	g := valid()
 	g.Title = ""
-	g.Timeline.Start = time.Time{}
 	g.Levels[0].User = "Not A User"
+	g.Levels[1].Services = []Service{{Name: "agent", User: "root", Exec: "/usr/local/bin/agent"}}
 
 	err := g.Validate()
 	if err == nil {
@@ -265,5 +276,81 @@ func TestGrantPathSplitting(t *testing.T) {
 	}
 	if got := plain.Member(); got != "" {
 		t.Errorf("Member() = %q, want empty", got)
+	}
+}
+
+// Scheduled jobs are how a box gets a pulse, and a crontab line with the wrong
+// number of fields is not an error cron reports anywhere a player would see:
+// the job simply never runs.
+func TestCronScheduleIsChecked(t *testing.T) {
+	g := valid()
+	g.Levels[1].Cron = []CronJob{{Schedule: "17 2 * *", Command: "/usr/local/bin/stage"}}
+	mustFail(t, g, "has 4 schedule fields, want 5")
+
+	g = valid()
+	g.Levels[1].Cron = []CronJob{{Schedule: "@fortnightly", Command: "/usr/local/bin/stage"}}
+	mustFail(t, g, "unknown schedule keyword")
+
+	g = valid()
+	g.Levels[1].Cron = []CronJob{{Schedule: "17 2 * * *", Command: ""}}
+	mustFail(t, g, "has no command")
+
+	g = valid()
+	g.Levels[1].Cron = []CronJob{{Schedule: "@daily", Command: "one\ntwo"}}
+	mustFail(t, g, "multi-line command")
+
+	g = valid()
+	g.Levels[1].Cron = []CronJob{
+		{Schedule: "17 2 * * *", Command: "/usr/local/bin/stage"},
+		{Schedule: "@daily", Command: "/usr/local/bin/prune", User: "bkup"},
+	}
+	if err := g.Validate(); err != nil {
+		t.Fatalf("valid cron entries should pass: %v", err)
+	}
+}
+
+// A service with no command is a service init has nothing to start.
+func TestServiceExecIsRequired(t *testing.T) {
+	g := valid()
+	g.Levels[1].Services = []Service{{Name: "agent", User: "agentd", Port: 8377}}
+	mustFail(t, g, "has no exec")
+
+	g = valid()
+	g.Levels[1].Services = []Service{{Name: "agent", User: "agentd", Exec: "bin/agent"}}
+	mustFail(t, g, "relative exec")
+
+	// The name becomes an init script name, so it has to be one.
+	g = valid()
+	g.Levels[1].Services = []Service{{Name: "Backup Agent", User: "agentd", Exec: "/usr/local/bin/agent"}}
+	mustFail(t, g, "must be a lowercase slug")
+}
+
+func TestDurationAcceptsDays(t *testing.T) {
+	var d Duration
+	for _, tc := range []struct {
+		text string
+		want time.Duration
+	}{
+		{"120d", 120 * 24 * time.Hour},
+		{"2w", 14 * 24 * time.Hour},
+		{"36h", 36 * time.Hour},
+		{"90m", 90 * time.Minute},
+	} {
+		var node yaml.Node
+		if err := yaml.Unmarshal([]byte(tc.text), &node); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.UnmarshalYAML(node.Content[0]); err != nil {
+			t.Fatalf("%s: %v", tc.text, err)
+		}
+		if d.Duration() != tc.want {
+			t.Errorf("%s = %v, want %v", tc.text, d.Duration(), tc.want)
+		}
+	}
+
+	var node yaml.Node
+	_ = yaml.Unmarshal([]byte("nonsense"), &node)
+	if err := d.UnmarshalYAML(node.Content[0]); err == nil {
+		t.Error("expected a parse error for nonsense")
 	}
 }

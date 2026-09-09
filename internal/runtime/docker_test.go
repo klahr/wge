@@ -109,8 +109,10 @@ func TestSandboxDefaults(t *testing.T) {
 	if drop := cfg["CapDrop"].([]string); len(drop) != 1 || drop[0] != "ALL" {
 		t.Errorf("CapDrop = %v, want [ALL] before adding back", drop)
 	}
-	if opt := cfg["SecurityOpt"].([]string); !contains(opt, "no-new-privileges") {
-		t.Errorf("SecurityOpt = %v, want no-new-privileges", opt)
+	// no-new-privileges must NOT be set: it makes the kernel ignore the setuid
+	// bit, which breaks su(1) and with it the move between levels.
+	if opt, ok := cfg["SecurityOpt"]; ok {
+		t.Errorf("SecurityOpt = %v; no-new-privileges breaks su and sudo on a multi-user box", opt)
 	}
 }
 

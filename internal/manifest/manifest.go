@@ -39,6 +39,10 @@ const FilesDir = "files"
 
 // SetupScript inside a level directory runs at image build time, after the home
 // tree is copied, to fix permissions and install services and cron entries.
+//
+// A script of the same name at the root of a game directory configures the
+// machine itself -- the things that belong to no single level, such as an MTA's
+// configuration -- and runs before any level's.
 const SetupScript = "setup.sh"
 
 // Game is a complete, loaded game definition.
@@ -72,13 +76,69 @@ type Game struct {
 // Timeline anchors the fictional clock. Files are aged around it at build time:
 // an image whose every mtime is the build timestamp reads as fake immediately.
 type Timeline struct {
+	// Start is when the box's recorded history begins. Leave it unset for a
+	// timeline anchored to the build, which is almost always what a game wants:
+	// a fixed date in the past means every live process -- a cron job, a
+	// service writing its log -- stamps entries months after everything else on
+	// the box, and contradicts the aging that made the box convincing.
+	//
+	// Set it only for a game that is deliberately a period piece.
 	Start time.Time `yaml:"start"`
 
 	// Span is how long the box's fictional history runs. The present -- the
 	// newest any file on the box may be -- is Start plus Span. Zero means the
 	// engine's default.
-	Span time.Duration `yaml:"span"`
+	Span Duration `yaml:"span"`
 }
+
+// Duration is a time.Duration that also understands days and weeks.
+//
+// Go's parser stops at hours, which makes the natural way to write a game's
+// timeline -- "120d" -- a parse error, and the alternative, "2880h", something
+// nobody can read.
+type Duration time.Duration
+
+// Duration returns the value as a time.Duration.
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
+
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// UnmarshalYAML accepts anything Go accepts, plus a d or w suffix.
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	var text string
+	if err := node.Decode(&text); err != nil {
+		return err
+	}
+	text = strings.TrimSpace(text)
+
+	unit := time.Duration(0)
+	switch {
+	case strings.HasSuffix(text, "d"):
+		unit = 24 * time.Hour
+	case strings.HasSuffix(text, "w"):
+		unit = 7 * 24 * time.Hour
+	}
+
+	if unit != 0 {
+		var count float64
+		if _, err := fmt.Sscanf(strings.TrimRight(text, "dw"), "%g", &count); err != nil {
+			return fmt.Errorf("parse duration %q: %w", text, err)
+		}
+		*d = Duration(time.Duration(count * float64(unit)))
+		return nil
+	}
+
+	parsed, err := time.ParseDuration(text)
+	if err != nil {
+		return fmt.Errorf("parse duration %q: %w", text, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// Anchored reports whether the timeline is pinned to a fixed date rather than
+// to the build.
+func (t Timeline) Anchored() bool { return !t.Start.IsZero() }
 
 // Host is one machine in a run. A run of a multi-host game is a set of
 // containers on a private bridge network.
@@ -112,6 +172,7 @@ type Level struct {
 
 	Narrative Narrative `yaml:"narrative"`
 	Services  []Service `yaml:"services"`
+	Cron      []CronJob `yaml:"cron"`
 
 	// Dir is the level's directory on disk.
 	Dir string `yaml:"-"`
@@ -194,8 +255,42 @@ type Service struct {
 	// as root hands its own uid to whoever compromises it, which collapses
 	// every level above it at once.
 	User string `yaml:"user"`
-	Unit string `yaml:"unit"`
-	Port int    `yaml:"port"`
+	// Description is what init and ps report the daemon as.
+	Description string `yaml:"description"`
+	// Exec is the command init starts. The game supplies it through the level's
+	// files/ tree like anything else.
+	Exec string `yaml:"exec"`
+	// Args are passed to Exec.
+	Args []string `yaml:"args"`
+	// Port is the port the service listens on, for the validator and for the
+	// author's own documentation. Zero means it listens on nothing.
+	Port int `yaml:"port"`
+	// Log is where the daemon's output is appended. Defaults to
+	// /var/log/<name>.log.
+	Log string `yaml:"log"`
+}
+
+// LogPath is where a service's output goes.
+func (s Service) LogPath() string {
+	if s.Log != "" {
+		return s.Log
+	}
+	return "/var/log/" + s.Name + ".log"
+}
+
+// CronJob is a scheduled command. Jobs that actually fire are what give a box a
+// pulse: a player who watches /var/log for ten minutes should be rewarded, and
+// a scheduled job is a puzzle surface in its own right -- a writable script run
+// by somebody else's crontab is a classic.
+type CronJob struct {
+	// Schedule is a five-field cron specification, or one of cron's @keywords.
+	Schedule string `yaml:"schedule"`
+	// User defaults to the level's own account.
+	User string `yaml:"user"`
+	// Command is the shell command cron runs.
+	Command string `yaml:"command"`
+	// Comment is written above the entry, as a real crontab would carry.
+	Comment string `yaml:"comment"`
 }
 
 var (

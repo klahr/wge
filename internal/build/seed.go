@@ -139,7 +139,12 @@ const templateMarker = "{{"
 // passwords. It must complete before a player is attached: an unseeded
 // container has placeholder text where its credentials should be.
 func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, host string, secrets *RunSecrets) error {
-	rendered, err := RenderTemplates(g, host, secrets)
+	anchor, err := AnchorOf(ctx, s.api, container)
+	if err != nil {
+		return err
+	}
+
+	rendered, err := RenderTemplates(g, host, anchor, secrets)
 	if err != nil {
 		return err
 	}
@@ -165,7 +170,7 @@ func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, h
 	if err := s.setPasswords(ctx, container, g, host, secrets); err != nil {
 		return err
 	}
-	return s.restoreTimes(ctx, container, g, host, rendered)
+	return s.restoreTimes(ctx, container, g, host, anchor, rendered)
 }
 
 // setPasswords writes the level accounts' passwords via chpasswd on stdin.
@@ -213,13 +218,14 @@ func (s *Seeder) setPasswords(ctx context.Context, container string, g *manifest
 // moment this player's container was created, which is a fact about the game
 // engine rather than about the box.
 func (s *Seeder) restoreTimes(
-	ctx context.Context, container string, g *manifest.Game, host string, rendered []entry,
+	ctx context.Context, container string, g *manifest.Game, host string,
+	anchor time.Time, rendered []entry,
 ) error {
-	plan, err := Assemble(g, host)
+	plan, err := Assemble(g, host, anchor)
 	if err != nil {
 		return err
 	}
-	aging := NewAging(g.ID, g.Version, g.Timeline.Start, g.Timeline.Span)
+	aging := NewAging(g.ID, g.Version, anchor, g.Timeline.Span.Duration())
 	owner := Owner{User: "root"}
 
 	// Ordered, so a parent is stamped after the child whose write disturbed it.
@@ -373,12 +379,12 @@ func (s *Seeder) adoptExistingMetadata(ctx context.Context, container string, en
 // exact mtime a rendered file is supposed to have -- without which every file
 // holding a credential would carry the container's start time and stand out
 // from everything around it.
-func RenderTemplates(g *manifest.Game, host string, secrets *RunSecrets) ([]entry, error) {
+func RenderTemplates(g *manifest.Game, host string, anchor time.Time, secrets *RunSecrets) ([]entry, error) {
 	accounts, err := planAccounts(g)
 	if err != nil {
 		return nil, err
 	}
-	aging := NewAging(g.ID, g.Version, g.Timeline.Start, g.Timeline.Span)
+	aging := NewAging(g.ID, g.Version, anchor, g.Timeline.Span.Duration())
 
 	byUser := map[string]*account{}
 	for _, a := range accounts {
@@ -533,6 +539,33 @@ func tarEntries(entries []entry) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// AnchorOf reads the timeline anchor the build recorded on a container's image.
+//
+// It travels as a label rather than a file because a label is invisible from
+// inside the container. Everything downstream of the build has to age against
+// the clock the build used, and for a game with a relative timeline that clock
+// is not derivable from the manifest alone.
+func AnchorOf(ctx context.Context, api *docker.Client, container string) (time.Time, error) {
+	var inspect struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := api.Get(ctx, "/containers/"+container+"/json", &inspect); err != nil {
+		return time.Time{}, fmt.Errorf("read timeline anchor: %w", err)
+	}
+
+	raw, ok := inspect.Config.Labels[AnchorLabel]
+	if !ok {
+		return time.Time{}, fmt.Errorf("image carries no %s label; rebuild the game", AnchorLabel)
+	}
+	unix, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("malformed %s label %q: %w", AnchorLabel, raw, err)
+	}
+	return time.Unix(unix, 0).UTC(), nil
 }
 
 // runtimeFiles are written by the container runtime when the container starts,

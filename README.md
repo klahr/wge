@@ -64,6 +64,32 @@ games/heist/
       setup.sh           # permissions, services, cron
 ```
 
+Levels declare the services and scheduled work that belong to them:
+
+```yaml
+services:
+  - name: backup-agent
+    user: bkupd                       # never root, never a level's account
+    description: Ardent nightly backup agent
+    exec: /usr/local/lib/backup-agent/agent
+    port: 8377
+
+cron:
+  - schedule: "17 2 * * *"
+    comment: stage last night's restore for review
+    command: /usr/local/bin/stage-nightly
+```
+
+Each service becomes a real LSB init script wired into the runlevels, so
+`service backup-agent status`, `/etc/init.d/backup-agent restart` and the boot
+sequence all behave as a player expects. Cron entries land in `/etc/cron.d`,
+where they are visible and readable — a scheduled job is a puzzle surface in
+its own right, and a writable script run by somebody else's crontab is a
+classic.
+
+A `setup.sh` at the root of a game directory configures the machine itself, for
+the things that belong to no single level.
+
 Any file containing `{{` is a template, rendered per run:
 
 ```
@@ -209,6 +235,31 @@ ssh enroll@localhost -p 2222      # register, and collect the first password
 ssh heist@localhost -p 2222       # play
 ```
 
+## The box is alive
+
+`/sbin/init` is a real Debian sysvinit, not a supervisor script, so the box has
+a real process tree: init, syslogd, cron, postfix and the game's own daemons,
+each started from the runlevels and reaped properly. `ps -ef`, `ss -tlnp`,
+`service`, `mailq` and a tail of `/var/log` all return what they should.
+
+**Not systemd**, and that is a security decision before it is an aesthetic one.
+systemd will not boot in a container without `CAP_SYS_ADMIN` — the single
+capability most likely to get a player out of the container, which is not a
+trade worth making on a box we invite strangers to attack. sysvinit needs none
+of it. systemd is then purged outright: leaving `systemctl` on a box that did
+not boot with systemd means leaving a tool that answers every question with an
+error, and a tool that cannot do its job is a tell.
+
+This is also why a game's timeline should be **anchored to the build** rather
+than to a fixed date. As soon as anything on the box is alive, it writes with
+the real clock: a cron job that fires, a daemon appending to its log. Against a
+fixed date in the past, every one of those entries lands months after the newest
+file on a carefully aged box. Leave `timeline.start` unset and the fictional
+present and the real present are the same moment — the generated history runs
+right up to the live entries with no seam. The resolved anchor travels as an
+image label, invisible from inside the container, so seeding and verification
+age against the same clock the build used.
+
 ## Sandboxing
 
 Players are invited to attack the box, so the container boundary is the only
@@ -227,6 +278,14 @@ already root. `SETUID`, `SETGID`, `CHOWN`, `FOWNER`, `FSETID`, `DAC_OVERRIDE`,
 `KILL`, `AUDIT_WRITE`, `NET_BIND_SERVICE`. What stays dropped is what gets a
 player off the box or onto the network: `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN`,
 `NET_RAW`, `MKNOD`, `SETFCAP` and the rest.
+
+`no-new-privileges` is deliberately **not** set, for the same reason. It makes
+the kernel ignore the setuid bit, so `su` cannot become root to read
+`/etc/shadow` and fails with `Authentication failure`, and `sudo` refuses to run
+at all. What it would have prevented is a player finding a setuid binary and
+becoming root *inside* the container — which is the game working, and is not a
+way out. The compensating control is the setuid audit in `wge test`, which
+proves the box carries exactly the setuid binaries the base image ships.
 
 ## Status
 
@@ -257,6 +316,7 @@ Next, roughly in order:
    it already knows whether a player is circling or stalled — no in-container
    agent to find or tamper with. Hints arrive as mail from an in-fiction
    correspondent, escalating in tiers, and unprompted when a player stalls.
-3. **Services and cron.** Declared in the manifest and validated, but not yet
-   installed or started by the build; PID 1 is `sleep infinity`.
-4. **The reaper**, scratch-volume persistence, and multi-host runs.
+3. **The reaper**, scratch-volume persistence, and multi-host runs.
+4. **A correspondent that answers.** Postfix delivers local mail and `mail(1)`
+   reads it, so the pipe from a player writing to their handler is in place;
+   what is missing is the delivery hook that routes it to the broker.

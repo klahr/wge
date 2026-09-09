@@ -1,5 +1,6 @@
 id: ops-oncall
 user: oncall
+host: relay2
 requires: [backup-op]
 
 grants:

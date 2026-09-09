@@ -1,0 +1,10 @@
+#!/bin/sh
+# Stage the previous night's archive under /var/backups for review.
+set -u
+
+STAGING=/var/backups
+stamp=$(date '+%Y-%m-%d %H:%M:%S')
+count=$(find "$STAGING" -type f 2>/dev/null | wc -l)
+
+printf '%s stage-nightly: %s files staged under %s\n' "$stamp" "$count" "$STAGING" \
+	>> /var/log/backup-agent.log 2>/dev/null

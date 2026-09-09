@@ -82,11 +82,6 @@ func (r *Report) OK() bool { return len(r.Findings) == 0 }
 // exist for the checks to mean anything, and they must not be a run anyone is
 // playing.
 func (v *Verifier) Verify(ctx context.Context, g *manifest.Game, host, image string) (*Report, error) {
-	plan, err := Assemble(g, host)
-	if err != nil {
-		return nil, err
-	}
-
 	salt, err := creds.NewSalt()
 	if err != nil {
 		return nil, err
@@ -104,6 +99,15 @@ func (v *Verifier) Verify(ctx context.Context, g *manifest.Game, host, image str
 
 	if err := v.seeder.Seed(ctx, container, g, host, secrets); err != nil {
 		return nil, fmt.Errorf("seed verification container: %w", err)
+	}
+
+	anchor, err := AnchorOf(ctx, v.api, container)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := Assemble(g, host, anchor)
+	if err != nil {
+		return nil, err
 	}
 
 	report := &Report{Image: image}
@@ -137,7 +141,6 @@ func (v *Verifier) start(ctx context.Context, container, image, host string) err
 		"HostConfig": map[string]any{
 			"CapDrop":     []string{"ALL"},
 			"CapAdd":      []string{"SETUID", "SETGID", "CHOWN", "FOWNER", "FSETID", "DAC_OVERRIDE", "AUDIT_WRITE"},
-			"SecurityOpt": []string{"no-new-privileges"},
 			"NetworkMode": "none",
 			"AutoRemove":  false,
 		},
@@ -225,6 +228,7 @@ func (v *Verifier) verifyLevel(
 		return nil, 0, err
 	}
 
+	checked := len(required) + len(forbidden) + 1
 	var findings []Finding
 	for _, path := range required {
 		if !probes[path] {
@@ -249,7 +253,29 @@ func (v *Verifier) verifyLevel(
 	}
 	findings = append(findings, leaks...)
 
-	return findings, len(required) + len(forbidden) + 1, nil
+	// A service account is a node in the permission graph too. Whoever
+	// compromises the daemon holds its uid, so anything that uid can read is
+	// effectively readable from the level the service is reachable from -- and
+	// a service quietly given more reach than its level collapses the graph
+	// without the manifest saying anything about it.
+	for _, svc := range l.Services {
+		probes, err := v.probe(ctx, container, svc.User, forbidden)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, path := range forbidden {
+			if probes[path] {
+				findings = append(findings, Finding{
+					Kind: FindingLeak, Level: l.ID, Path: path,
+					Detail: fmt.Sprintf("service %q runs as %s, which can read this; compromising the daemon reaches a level %s has not",
+						svc.Name, svc.User, l.ID),
+				})
+			}
+		}
+		checked += len(forbidden)
+	}
+
+	return findings, checked, nil
 }
 
 // probe asks, as the given user, which of these paths can be read.

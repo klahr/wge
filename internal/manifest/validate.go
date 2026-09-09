@@ -41,6 +41,7 @@ func (g *Game) Validate() error {
 	errs = append(errs, g.validateLevels()...)
 	errs = append(errs, g.validateGraph()...)
 	errs = append(errs, g.validateServices()...)
+	errs = append(errs, g.validateCron()...)
 
 	if len(errs) == 0 {
 		return nil
@@ -62,15 +63,10 @@ func (g *Game) validateMeta() Errors {
 	if len(g.Hosts) == 0 && strings.TrimSpace(g.Base) == "" {
 		errs = append(errs, fmt.Errorf("game must set base, or declare hosts that do"))
 	}
-	// Without a fictional clock there is nothing to age files against, and
-	// every mtime in the image collapses onto the build timestamp.
-	if g.Timeline.Start.IsZero() {
-		errs = append(errs, fmt.Errorf("timeline.start is required so file timestamps can be aged"))
-	}
 	if g.NoiseUsers < 0 {
 		errs = append(errs, fmt.Errorf("noise_users cannot be negative"))
 	}
-	if g.Timeline.Span < 0 {
+	if g.Timeline.Span.Duration() < 0 {
 		errs = append(errs, fmt.Errorf("timeline.span cannot be negative"))
 	}
 	return errs
@@ -449,6 +445,63 @@ func (g *Game) validateServices() Errors {
 			seen[s.Name] = l.ID
 			if s.Port < 0 || s.Port > 65535 {
 				errs = append(errs, fmt.Errorf("level %s: service %q has port %d out of range", l.ID, s.Name, s.Port))
+			}
+			if strings.TrimSpace(s.Exec) == "" {
+				errs = append(errs, fmt.Errorf("level %s: service %q has no exec; init would have nothing to start", l.ID, s.Name))
+			} else if !path.IsAbs(s.Exec) {
+				errs = append(errs, fmt.Errorf("level %s: service %q has a relative exec %q", l.ID, s.Name, s.Exec))
+			}
+			if !slugPattern.MatchString(s.Name) {
+				errs = append(errs, fmt.Errorf("level %s: service name %q must be a lowercase slug; it becomes an init script name", l.ID, s.Name))
+			}
+			if s.Log != "" && !path.IsAbs(s.Log) {
+				errs = append(errs, fmt.Errorf("level %s: service %q has a relative log path %q", l.ID, s.Name, s.Log))
+			}
+		}
+	}
+	return errs
+}
+
+// cronKeywords are the schedules cron accepts in place of five fields.
+var cronKeywords = map[string]bool{
+	"@reboot": true, "@yearly": true, "@annually": true, "@monthly": true,
+	"@weekly": true, "@daily": true, "@midnight": true, "@hourly": true,
+}
+
+// validateCron checks the scheduled jobs.
+//
+// A crontab line with the wrong number of fields is not an error cron reports
+// anywhere a player would see. The job simply never runs, the box loses the
+// pulse it was supposed to have, and nothing says why.
+func (g *Game) validateCron() Errors {
+	var errs Errors
+
+	for _, l := range g.Levels {
+		for i, job := range l.Cron {
+			where := fmt.Sprintf("level %s: cron job %d", l.ID, i)
+
+			schedule := strings.TrimSpace(job.Schedule)
+			switch {
+			case schedule == "":
+				errs = append(errs, fmt.Errorf("%s has no schedule", where))
+			case strings.HasPrefix(schedule, "@"):
+				if !cronKeywords[schedule] {
+					errs = append(errs, fmt.Errorf("%s has unknown schedule keyword %q", where, schedule))
+				}
+			default:
+				if n := len(strings.Fields(schedule)); n != 5 {
+					errs = append(errs, fmt.Errorf("%s has %d schedule fields, want 5", where, n))
+				}
+			}
+
+			if strings.TrimSpace(job.Command) == "" {
+				errs = append(errs, fmt.Errorf("%s has no command", where))
+			}
+			if strings.ContainsAny(job.Command, "\n\r") {
+				errs = append(errs, fmt.Errorf("%s has a multi-line command; a crontab entry is one line", where))
+			}
+			if job.User != "" && !userPattern.MatchString(job.User) {
+				errs = append(errs, fmt.Errorf("%s has invalid user %q", where, job.User))
 			}
 		}
 	}

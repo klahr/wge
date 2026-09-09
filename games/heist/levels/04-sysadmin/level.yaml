@@ -1,5 +1,6 @@
 id: sysadmin
 user: dsundqvist
+host: relay2
 # Two prerequisites, satisfied by two different kinds of credential: the split
 # is what makes this a graph rather than a chain.
 requires: [backup-op, ops-oncall]

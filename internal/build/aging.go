@@ -39,6 +39,30 @@ type Aging struct {
 // box still belongs to one era.
 const DefaultSpan = 90 * 24 * time.Hour
 
+// AnchorLabel is the image label carrying the resolved timeline anchor.
+const AnchorLabel = "wge.timeline.start"
+
+// ResolveAnchor returns the date a game's recorded history begins.
+//
+// A game that does not pin a date gets one relative to the build, so that the
+// fictional present and the real present are the same moment. That matters as
+// soon as anything on the box is alive: a cron job that fires, a service that
+// appends to its log. Those write with the real clock, and against a fixed past
+// date every one of them lands months after the newest file on a box that is
+// otherwise carefully aged.
+//
+// The resolved value is recorded on the image, because everything downstream --
+// seeding, verification -- has to age against the same anchor the build used.
+func ResolveAnchor(start time.Time, span time.Duration, built time.Time) time.Time {
+	if !start.IsZero() {
+		return start
+	}
+	if span <= 0 {
+		span = DefaultSpan
+	}
+	return built.Add(-span)
+}
+
 // NewAging returns the aging plan for a game version.
 func NewAging(gameID string, version int, start time.Time, span time.Duration) *Aging {
 	if span <= 0 {

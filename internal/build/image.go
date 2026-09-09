@@ -39,7 +39,9 @@ type Result struct {
 
 // Build assembles and builds the image for one host of a game.
 func (b *Builder) Build(ctx context.Context, g *manifest.Game, host, tag string, progress io.Writer) (*Result, error) {
-	plan, err := Assemble(g, host)
+	anchor := ResolveAnchor(g.Timeline.Start, g.Timeline.Span.Duration(), time.Now())
+
+	plan, err := Assemble(g, host, anchor)
 	if err != nil {
 		return nil, err
 	}
@@ -70,13 +72,19 @@ type Plan struct {
 	Accounts []*account
 	Aging    *Aging
 
-	rootfs *rootfs
-	setup  map[string][]byte // level id -> setup.sh
+	// Anchor is the resolved start of the fictional timeline. It is recorded on
+	// the image so that seeding and verification age against the same clock the
+	// build did.
+	Anchor time.Time
+
+	rootfs    *rootfs
+	setup     map[string][]byte // level id -> setup.sh
+	gameSetup []byte            // the game's own setup.sh, if it has one
 }
 
 // Assemble builds the plan for one host of a game without touching Docker, so
 // it can be inspected and tested on its own.
-func Assemble(g *manifest.Game, host string) (*Plan, error) {
+func Assemble(g *manifest.Game, host string, anchor time.Time) (*Plan, error) {
 	accounts, err := planAccounts(g)
 	if err != nil {
 		return nil, err
@@ -86,7 +94,8 @@ func Assemble(g *manifest.Game, host string) (*Plan, error) {
 		Game:     g,
 		Host:     host,
 		Accounts: accounts,
-		Aging:    NewAging(g.ID, g.Version, g.Timeline.Start, g.Timeline.Span),
+		Anchor:   anchor,
+		Aging:    NewAging(g.ID, g.Version, anchor, g.Timeline.Span.Duration()),
 		rootfs:   newRootfs(),
 		setup:    map[string][]byte{},
 	}
@@ -96,6 +105,11 @@ func Assemble(g *manifest.Game, host string) (*Plan, error) {
 			return nil, err
 		}
 	}
+	if err := p.addServices(); err != nil {
+		return nil, err
+	}
+	p.addCron()
+
 	if err := p.addSystemFiles(); err != nil {
 		return nil, err
 	}
@@ -287,6 +301,14 @@ func (p *Plan) addSystemFiles() error {
 		ModTime: p.Aging.LogTime("lastlog2", 9, 10),
 	})
 
+	// rsyslog appends to this; without a history it would begin at the moment
+	// this player's container started.
+	p.rootfs.add(entry{
+		Path: "/var/log/syslog", Content: p.syslogHistory(),
+		Mode: 0o640, UID: 0, GID: 4,
+		ModTime: p.Aging.LogTime("syslog", 9, 10),
+	})
+
 	p.rootfs.add(entry{
 		Path: "/var/log/auth.log", Content: authLog(p.Aging, p.Accounts, sessions, p.Host),
 		// Debian keeps auth.log unreadable by ordinary users. A world-readable
@@ -323,6 +345,15 @@ func (p *Plan) motd() string {
 }
 
 func (p *Plan) loadSetupScripts() error {
+	// The machine's own configuration, for the things that belong to no
+	// single level.
+	raw, err := os.ReadFile(filepath.Join(p.Game.Dir, manifest.SetupScript))
+	if err == nil {
+		p.gameSetup = raw
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read game %s: %w", manifest.SetupScript, err)
+	}
+
 	for _, l := range p.Game.Levels {
 		if l.Host != p.Host {
 			continue
@@ -358,6 +389,16 @@ func (p *Plan) ModTime(target string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// hasServices reports whether any level on this host declares a service.
+func (p *Plan) hasServices() bool {
+	for _, l := range p.Game.Levels {
+		if l.Host == p.Host && len(l.Services) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // PathsByLevel returns the paths each level's account owns, which is what the
@@ -431,8 +472,22 @@ func (p *Plan) Context() ([]byte, error) {
 	if err := add("meta.txt", p.rootfs.metaPlan(), 0o644); err != nil {
 		return nil, err
 	}
+	if err := add("sysdirs.txt",
+		[]byte(strings.Join(p.rootfs.systemDirsTouched(), "\n")+"\n"), 0o644); err != nil {
+		return nil, err
+	}
 	if err := add("setup.sh", []byte(p.setupScript()), 0o755); err != nil {
 		return nil, err
+	}
+	if p.hasServices() {
+		if err := add("services.sh", []byte(p.registerServices()), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	if len(p.gameSetup) > 0 {
+		if err := add("game-setup.sh", p.gameSetup, 0o755); err != nil {
+			return nil, err
+		}
 	}
 	for id, script := range p.setup {
 		if err := add("setup/"+id+".sh", script, 0o755); err != nil {
@@ -476,12 +531,31 @@ func (p *Plan) dockerfile() string {
 	b.WriteString("COPY provision.sh /wge/provision.sh\n")
 	b.WriteString("RUN sh /wge/provision.sh\n")
 
-	b.WriteString("COPY apply-meta.sh meta.txt /wge/\n")
+	b.WriteString("COPY apply-meta.sh meta.txt sysdirs.txt /wge/\n")
+
+	// Record what the system directories look like before COPY disturbs them.
+	b.WriteString("RUN sh /wge/apply-meta.sh /wge/meta.txt snapshot\n")
+
 	b.WriteString("COPY rootfs/ /\n")
+
+	// And put them back.
+	b.WriteString("RUN sh /wge/apply-meta.sh /wge/meta.txt restore\n")
 
 	// Ownership first, so a level's setup.sh runs against files that already
 	// belong to the right accounts and can express its access control on top.
 	b.WriteString("RUN sh /wge/apply-meta.sh /wge/meta.txt own\n")
+
+	// Services are registered before the level setup scripts, so a setup script
+	// can disable or reorder one if the game wants it to.
+	if p.hasServices() {
+		b.WriteString("COPY services.sh /wge/services.sh\n")
+		b.WriteString("RUN sh /wge/services.sh\n")
+	}
+
+	if len(p.gameSetup) > 0 {
+		b.WriteString("COPY game-setup.sh /wge/game-setup.sh\n")
+		b.WriteString("RUN sh /wge/game-setup.sh\n")
+	}
 
 	if len(p.setup) > 0 {
 		b.WriteString("COPY setup.sh /wge/setup.sh\n")
@@ -499,8 +573,15 @@ func (p *Plan) dockerfile() string {
 		" && sh /wge/apply-meta.sh /wge/meta.txt time \\\n"+
 		" && rm -rf /wge\n", p.Aging.Provisioned().Unix())
 
-	// PID 1 only has to keep the container alive; players arrive by exec.
-	b.WriteString(`CMD ["/bin/sleep", "infinity"]` + "\n")
+	// The anchor travels as an image label: invisible from inside the
+	// container, and available to everything downstream that has to age
+	// against the same clock the build used.
+	fmt.Fprintf(&b, "LABEL %s=%d\n", AnchorLabel, p.Anchor.Unix())
+
+	// A real init, so the box has a real process tree, services have somewhere
+	// to be started from, and orphaned processes are reaped by something that
+	// is meant to reap them.
+	b.WriteString(`CMD ["/sbin/init"]` + "\n")
 
 	return b.String()
 }
@@ -606,6 +687,11 @@ func (p *Plan) setupScript() string {
 const applyMetaScript = `#!/bin/sh
 # Apply one phase of the metadata plan.
 #
+#   snapshot -- record the mode and ownership of the system directories the
+#            game places files into, before COPY rewrites them.
+#   restore  -- put those back afterwards. COPY resets the metadata of every
+#            directory it traverses, existing or not, and /var/mail must stay
+#            2775 root:mail or mail(1) cannot lock a mailbox.
 #   own   -- restore ownership, which COPY discarded. Runs before the level
 #            setup scripts so they can override it and build on it.
 #   sweep -- date everything the game did not place to the provisioning time,
@@ -623,6 +709,24 @@ set -u
 
 plan="$1"
 phase="$2"
+
+if [ "$phase" = "snapshot" ]; then
+	: > /wge/sysdirs.saved
+	while IFS= read -r dir; do
+		[ -d "$dir" ] || continue
+		stat -c '%a %u %g %n' -- "$dir" >> /wge/sysdirs.saved
+	done < /wge/sysdirs.txt
+	exit 0
+fi
+
+if [ "$phase" = "restore" ]; then
+	while read -r mode uid gid dir; do
+		[ -d "$dir" ] || continue
+		chown "$uid:$gid" -- "$dir"
+		chmod "$mode" -- "$dir"
+	done < /wge/sysdirs.saved
+	exit 0
+fi
 
 if [ "$phase" = "sweep" ]; then
 	provisioned="$3"

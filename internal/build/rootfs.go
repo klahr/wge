@@ -159,6 +159,15 @@ func (r *rootfs) writeTar(tw *tar.Writer, prefix string) error {
 		if e.MetaOnly {
 			continue
 		}
+		// System directories are not shipped. They already exist in the base
+		// image with the mode the system expects, and COPY applies whatever
+		// mode the tar carries -- which for a synthesised parent is a plain
+		// 0755. That silently replaced /var/mail's 2775 root:mail with
+		// 0755 root:root, and mail(1) could no longer create a lockfile.
+		// Docker creates any missing parent on its own, so nothing is lost.
+		if e.Dir && isSystemPath(e.Path) {
+			continue
+		}
 		name := path.Join(prefix, strings.TrimPrefix(e.Path, "/"))
 
 		header := &tar.Header{
@@ -237,6 +246,29 @@ func (r *rootfs) metaPlan() []byte {
 		fmt.Fprintf(&b, "%s\t%d\t%s\n", owner, e.ModTime.Unix(), e.Path)
 	}
 	return b.Bytes()
+}
+
+// systemDirsTouched lists the system directories the plan places files into.
+//
+// COPY rewrites the metadata of directories it traverses, even ones that
+// already exist and even when the tar carries no entry for them. /var/mail is
+// the one that bites: the base image ships it 2775 root:mail because mail(1)
+// has to create a lockfile there, and COPY leaves it 0755 root:root.
+func (r *rootfs) systemDirsTouched() []string {
+	seen := map[string]bool{}
+	var out []string
+
+	for _, e := range r.entries {
+		for dir := path.Dir(e.Path); dir != "/" && dir != "."; dir = path.Dir(dir) {
+			if !isSystemPath(dir) || seen[dir] {
+				continue
+			}
+			seen[dir] = true
+			out = append(out, dir)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // addMeta records a timestamp (and optionally ownership) for a file the build
