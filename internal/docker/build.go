@@ -219,3 +219,37 @@ func demultiplex(r io.Reader, stdout, stderr io.Writer) error {
 func (d *Client) RemoveImage(ctx context.Context, name string) error {
 	return d.Delete(ctx, "/images/"+url.PathEscape(name)+"?force=true")
 }
+
+// Container is a summary of one container, as the engine lists it.
+type Container struct {
+	ID     string            `json:"Id"`
+	Names  []string          `json:"Names"`
+	Image  string            `json:"Image"`
+	State  string            `json:"State"`
+	Labels map[string]string `json:"Labels"`
+}
+
+// Name returns the container's name without the leading slash the engine adds.
+func (c Container) Name() string {
+	if len(c.Names) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(c.Names[0], "/")
+}
+
+// ListContainers returns every container carrying the given label, running or
+// not. It is how the engine finds what a previous process left behind.
+func (d *Client) ListContainers(ctx context.Context, label string) ([]Container, error) {
+	filters, err := json.Marshal(map[string][]string{"label": {label}})
+	if err != nil {
+		return nil, err
+	}
+
+	q := url.Values{"all": {"true"}, "filters": {string(filters)}}
+
+	var out []Container
+	if err := d.Get(ctx, "/containers/json?"+q.Encode(), &out); err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	return out, nil
+}

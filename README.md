@@ -223,6 +223,10 @@ wge test     <game-dir>    verify a built image enforces its level graph
 wge serve                  run the SSH front door
 ```
 
+`serve` takes `-grace` (how long a container outlives its last session, default
+15m), `-sweep` (how often abandoned containers are collected, default 5m) and
+`-node` (this machine's name in the runs table).
+
 To play the example game:
 
 ```
@@ -234,6 +238,29 @@ wge serve
 ssh enroll@localhost -p 2222      # register, and collect the first password
 ssh heist@localhost -p 2222       # play
 ```
+
+## Container lifecycle
+
+Containers are created when a player connects and destroyed when they stop
+using them. The reaper is a reference count with a delay: sessions hold a
+container, and when the last one lets go destruction is scheduled for the end
+of a grace period — long enough to survive a dropped connection or a closed
+laptop, short enough that an abandoned game is not still holding memory an hour
+later. A session arriving inside that window cancels it.
+
+A periodic sweep collects anything nothing is holding, which includes every
+container a previous engine process left behind. Collecting those on startup is
+the right thing rather than a compromise: nothing can tell whether a player is
+still behind them, and rebuilding one costs a reconnection.
+
+All of this is only safe because of the invariant. Reaping a container costs a
+player their scrollback and whatever they wrote, and nothing else — the same
+password opens the rebuilt box, because the box is a pure function of the salt.
+(Persisting the scratch they wrote is the obvious next improvement.)
+
+While a run has a live container, `runs.current_host` pins it to that machine so
+a returning player is sent back to the box they left; the reaper clears it when
+the last of the run's containers goes.
 
 ## The box is alive
 
@@ -316,7 +343,13 @@ Next, roughly in order:
    it already knows whether a player is circling or stalled — no in-container
    agent to find or tamper with. Hints arrive as mail from an in-fiction
    correspondent, escalating in tiers, and unprompted when a player stalls.
-3. **The reaper**, scratch-volume persistence, and multi-host runs.
-4. **A correspondent that answers.** Postfix delivers local mail and `mail(1)`
-   reads it, so the pipe from a player writing to their handler is in place;
-   what is missing is the delivery hook that routes it to the broker.
+3. **Multi-host runs.** The schema has `hosts:` and `egress:`, levels carry a
+   `host:`, and images are tagged per host — but a run is still one container,
+   there is no per-run network, and `egress` is declared and never enforced.
+   This is what makes pivoting possible, and it is where the realism ceiling
+   currently sits.
+4. **Scratch persistence.** A reap currently loses whatever the player wrote. A
+   small per-run volume mounted somewhere they keep notes would cost little and
+   remove the one real sting.
+5. **Admission control.** Nothing yet refuses a connection when a machine is
+   full; the resource caps are per container, not per host.

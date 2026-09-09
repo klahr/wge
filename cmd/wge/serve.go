@@ -27,6 +27,9 @@ func cmdServe(args []string) error {
 	addr := fs.String("addr", ":2222", "address to listen on")
 	gamesDir := fs.String("games", "games", "directory of game definitions")
 	dbPath := fs.String("db", "wge.db", "path to the engine database")
+	grace := fs.Duration("grace", runtime.DefaultGrace, "how long a container outlives its last session")
+	sweep := fs.Duration("sweep", runtime.DefaultSweep, "how often abandoned containers are collected")
+	node := fs.String("node", "", "name of this machine in the runs table (default: hostname)")
 	hostKeyPath := fs.String("host-key", "host_key", "SSH host key; generated if absent")
 	socket := fs.String("docker", runtime.DefaultSocket, "Docker engine socket")
 	verbose := fs.Bool("v", false, "log at debug level")
@@ -66,11 +69,19 @@ func cmdServe(args []string) error {
 		Socket: *socket,
 		Images: lib,
 		Seeder: build.NewSeeder(*socket),
+		Runs:   st,
+		Node:   *node,
+		Grace:  *grace,
+		Sweep:  *sweep,
 		Logger: log,
 	})
 	if err != nil {
 		return err
 	}
+
+	// Collect abandoned containers for as long as the broker is serving. The
+	// first pass runs immediately and clears whatever a previous process left.
+	go rt.Run(ctx)
 
 	srv, err := broker.New(broker.Config{
 		Addr:    *addr,

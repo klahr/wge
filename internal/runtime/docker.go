@@ -14,7 +14,10 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/klahr/wge/internal/broker"
 	"github.com/klahr/wge/internal/build"
@@ -106,13 +109,25 @@ type Seeder interface {
 	Seed(ctx context.Context, container string, g *manifest.Game, host string, secrets *build.RunSecrets) error
 }
 
+// Runs records which machine is holding a run's containers, so a returning
+// player is sent back to the box they left rather than to a rebuilt one.
+type Runs interface {
+	SetHost(ctx context.Context, runID int64, node string) error
+}
+
 // Docker attaches players to containers via the Engine API.
 type Docker struct {
 	api    *docker.Client
 	log    *slog.Logger
 	images Images
 	seeder Seeder
+	runs   Runs
 	limits Limits
+
+	// node identifies this machine in the runs table.
+	node   string
+	reaper *reaper
+	sweep  time.Duration
 
 	// creating serialises container creation per name, so two sessions racing
 	// into the same run do not both try to create its box.
@@ -124,7 +139,15 @@ type Options struct {
 	Socket string
 	Images Images
 	Seeder Seeder
+	// Runs is optional; without it sticky routing is not recorded.
+	Runs Runs
+	// Node names this machine. Defaults to the system hostname.
+	Node   string
 	Limits Limits
+	// Grace is how long a container outlives its last session.
+	Grace time.Duration
+	// Sweep is how often orphaned containers are collected.
+	Sweep  time.Duration
 	Logger *slog.Logger
 }
 
@@ -149,13 +172,29 @@ func NewDocker(opts Options) (*Docker, error) {
 		opts.Limits.Capabilities = multiUserCaps
 	}
 
-	return &Docker{
+	if opts.Node == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return nil, fmt.Errorf("runtime: determine node name: %w", err)
+		}
+		opts.Node = host
+	}
+	if opts.Sweep <= 0 {
+		opts.Sweep = DefaultSweep
+	}
+
+	d := &Docker{
 		api:    docker.New(opts.Socket),
 		log:    opts.Logger,
 		images: opts.Images,
 		seeder: opts.Seeder,
+		runs:   opts.Runs,
 		limits: opts.Limits,
-	}, nil
+		node:   opts.Node,
+		sweep:  opts.Sweep,
+	}
+	d.reaper = newReaper(opts.Grace, d.destroy)
+	return d, nil
 }
 
 // ContainerName is the container backing one host of one run. Deriving it from
@@ -174,6 +213,14 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 	}
 
 	name := ContainerName(s.Run.ID, s.Level.Host)
+	spot := target{Name: name, RunID: s.Run.ID}
+
+	// Claimed before the container is created, not after: a sweep running in
+	// the gap would find a container nothing is holding and destroy it while
+	// the session that asked for it was still starting.
+	d.reaper.hold(spot)
+	defer d.reaper.release(spot)
+
 	if err := d.ensureContainer(ctx, name, image, s); err != nil {
 		return 0, err
 	}
@@ -235,8 +282,93 @@ func (d *Docker) ensureContainer(ctx context.Context, name, image string, s *bro
 		return fmt.Errorf("seed container: %w", err)
 	}
 
+	// Sticky routing: while this container is alive the player comes back here.
+	if d.runs != nil {
+		if err := d.runs.SetHost(ctx, s.Run.ID, d.node); err != nil {
+			d.log.Error("record run placement", "run", s.Run.ID, "error", err)
+		}
+	}
+
 	d.log.Info("container created", "name", name, "image", image, "run", s.Run.ID)
 	return nil
+}
+
+// destroy removes a container whose grace period has run out.
+func (d *Docker) destroy(t target) {
+	// Deliberately not the session's context: the session is what ended.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := d.remove(ctx, t.Name); err != nil && !docker.IsNotFound(err) {
+		d.log.Error("reap container", "name", t.Name, "error", err)
+		return
+	}
+	d.reaper.forget(t.Name)
+	d.creating.Delete(t.Name)
+
+	// A run spanning several hosts keeps its placement until the last of its
+	// containers is gone.
+	remaining, err := d.api.ListContainers(ctx, fmt.Sprintf("wge.run=%d", t.RunID))
+	if err != nil {
+		d.log.Error("count remaining containers", "run", t.RunID, "error", err)
+		return
+	}
+	if len(remaining) == 0 && d.runs != nil {
+		if err := d.runs.SetHost(ctx, t.RunID, ""); err != nil {
+			d.log.Error("clear run placement", "run", t.RunID, "error", err)
+		}
+	}
+
+	d.log.Info("container reaped", "name", t.Name, "run", t.RunID)
+}
+
+// Run collects abandoned containers until the context is cancelled.
+//
+// The first sweep happens immediately, which means a starting engine destroys
+// whatever a previous process left behind. That is the right thing rather than
+// a compromise: nothing knows whether those containers still have players
+// behind them, and rebuilding one costs a reconnection.
+func (d *Docker) Run(ctx context.Context) {
+	ticker := time.NewTicker(d.sweep)
+	defer ticker.Stop()
+
+	d.sweepOnce(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			d.reaper.stop()
+			return
+		case <-ticker.C:
+			d.sweepOnce(ctx)
+		}
+	}
+}
+
+// sweepOnce destroys every game container no session is holding.
+func (d *Docker) sweepOnce(ctx context.Context) {
+	containers, err := d.api.ListContainers(ctx, "wge.run")
+	if err != nil {
+		d.log.Error("sweep containers", "error", err)
+		return
+	}
+
+	held := d.reaper.heldNames()
+	for _, c := range containers {
+		name := c.Name()
+		if name == "" || held[name] {
+			continue
+		}
+
+		runID, err := strconv.ParseInt(c.Labels["wge.run"], 10, 64)
+		if err != nil {
+			d.log.Error("container has an unreadable run label", "name", name, "label", c.Labels["wge.run"])
+			continue
+		}
+
+		d.log.Info("collecting abandoned container", "name", name, "run", runID)
+		d.destroy(target{Name: name, RunID: runID})
+	}
 }
 
 type containerState struct {
@@ -492,17 +624,6 @@ func (d *Docker) execExitCode(ctx context.Context, execID string) (int, error) {
 		return 0, nil
 	}
 	return resp.ExitCode, nil
-}
-
-// Reap destroys a run's container. The scratch volume, if any, outlives it.
-func (d *Docker) Reap(ctx context.Context, runID int64, host string) error {
-	name := ContainerName(runID, host)
-	if err := d.remove(ctx, name); err != nil && !docker.IsNotFound(err) {
-		return err
-	}
-	d.creating.Delete(name)
-	d.log.Info("container reaped", "name", name)
-	return nil
 }
 
 func (d *Docker) remove(ctx context.Context, name string) error {
