@@ -1,0 +1,4 @@
+relay 2 -- things that are mine
+  - spool is /var/mail, I can read my own and that's it
+  - drift says do not go poking. fine.
+  - backup rota starts monday, ask R for the login

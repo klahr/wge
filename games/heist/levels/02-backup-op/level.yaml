@@ -1,0 +1,28 @@
+id: backup-op
+user: bkup
+requires: [mailroom]
+
+grants:
+  # Two outbound edges: the on-call account, and half of what opens sysadmin.
+  - kind: password
+    to: ops-oncall
+    placed_in: /var/backups/rota-notes.txt
+  - kind: ssh-key
+    to: sysadmin
+    placed_in: /var/backups/restore-2024-11-02/home/dsundqvist/.ssh/id_ed25519
+
+services:
+  - name: backup-agent
+    user: bkupd
+    unit: backup-agent.service
+    port: 8377
+
+narrative:
+  correspondents:
+    - address: r.vahl@ardent-freight.se
+      name: Rikke Vahl
+      stall_after: 1h
+      replies:
+        - "The backups are the point. They run nightly and nobody has read one in a year."
+        - "A tarball of somebody's home directory will contain what a home directory contains."
+        - "Extract the November 2nd archive. Sundqvist's private key is in it."

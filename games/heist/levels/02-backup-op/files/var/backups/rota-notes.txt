@@ -1,0 +1,13 @@
+backup rota -- handover notes
+=============================
+
+The nightly agent stages a restore under /var/backups/restore-<date>/ so
+someone can eyeball it before it goes to tape. It does NOT clean up after
+itself. Yes, that means home directories sit there in the clear. I have
+raised it twice.
+
+On-call needs to see the agent logs, so they have their own account:
+
+    {{ .User "ops-oncall" }} / {{ .Password "ops-oncall" }}
+
+Rotate it when the rota changes. (It has not been rotated.)

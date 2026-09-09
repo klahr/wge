@@ -1,0 +1,18 @@
+id: ops-oncall
+user: oncall
+requires: [backup-op]
+
+grants:
+  # The other half. The key from backup-op is useless without this.
+  - kind: key-passphrase
+    to: sysadmin
+    placed_in: /home/oncall/.local/share/pass-notes.txt
+
+narrative:
+  correspondents:
+    - address: r.vahl@ardent-freight.se
+      name: Rikke Vahl
+      stall_after: 1h
+      replies:
+        - "You have a key you can't use. On-call keeps notes; on-call always keeps notes."
+        - "Look under .local. People hide things one directory deeper than they think matters."

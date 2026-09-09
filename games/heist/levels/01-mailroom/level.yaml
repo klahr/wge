@@ -1,0 +1,28 @@
+id: mailroom
+user: jposti
+# No prerequisites: this is where the player starts.
+requires: []
+
+grants:
+  - kind: password
+    to: backup-op
+    placed_in: /var/mail/jposti
+
+narrative:
+  motd: |
+    Ardent Freight AB -- mail relay 2
+    Unauthorised access is logged and prosecuted.
+  mail:
+    - mail/01-welcome.eml
+    - mail/02-backup-handover.eml
+  correspondents:
+    - address: r.vahl@ardent-freight.se
+      name: Rikke Vahl
+      stall_after: 45m
+      replies:
+        - "Start with what's already yours. People leave more in a mailbox than they think."
+        - "The handover note from the backup rota. Read it again, properly."
+        - "Second message in your mailbox has the account and the password in the quoted reply."
+      unprompted: >
+        You've gone quiet. If you're still staring at a prompt: everything you
+        need for the first step was already sent to you.

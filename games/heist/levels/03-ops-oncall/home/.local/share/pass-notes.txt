@@ -1,0 +1,11 @@
+(do not sync this file anywhere)
+
+vpn                 -- in keepass, fine
+relay2 root         -- don't have it, ask drift
+sundqvist's key     -- passphrase is
+
+    {{ .Passphrase "sysadmin" }}
+
+  he gave it to me when he was on holiday and never changed it. the key
+  itself is not on this box, it went out with a backup restore at some
+  point. do not put them in the same place.

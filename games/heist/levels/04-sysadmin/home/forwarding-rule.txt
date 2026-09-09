@@ -1,0 +1,7 @@
+This is what you came for.
+
+    /^Subject:.*manifest/  FILTER relay:[198.51.100.24]:2525
+
+It has been in the transport map since March. It is not in git, it is not
+in the change log, and the only person with commit access to that file is
+whoever owns this account.

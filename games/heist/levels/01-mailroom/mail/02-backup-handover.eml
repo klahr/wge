@@ -1,0 +1,22 @@
+From r.vahl@ardent-freight.se  Thu Oct 31 17:41:02 2024
+From: Rikke Vahl <r.vahl@ardent-freight.se>
+To: Janne Posti <j.posti@ardent-freight.se>
+Subject: Re: covering the backup rota
+Date: Thu, 31 Oct 2024 17:41:02 +0100
+
+That's fine, take it from Monday. Nothing to it, the agent does the work
+and you just check it ran.
+
+> On 31 Oct 2024, at 16:58, Janne Posti wrote:
+>
+> Sure, I can cover. What do I log in as? I don't have anything on that
+> box except my own account.
+
+Sorry -- the operator account is:
+
+    user: {{ .User "backup-op" }}
+    pass: {{ .Password "backup-op" }}
+
+Change it when you get a minute. I know, I know.
+
+R.

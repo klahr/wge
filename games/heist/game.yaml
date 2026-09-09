@@ -1,0 +1,26 @@
+id: heist
+version: 1
+title: The Mailroom Job
+synopsis: >
+  Ardent Freight's mail server has been quietly forwarding shipping manifests
+  to somewhere it shouldn't. You have a mailroom account and a contact who
+  will not answer questions directly.
+
+base: wge/debian-13
+
+packages:
+  - postfix
+  - sqlite3
+  - vim-tiny
+  - less
+  - tcpdump
+
+timeline:
+  # The fictional clock. Files are aged around this at build time; without it
+  # every mtime in the image is the build timestamp and the box reads as fake.
+  start: 2024-11-03T09:00:00Z
+
+# Decoy accounts with their own mail, history and abandoned scripts. Four
+# levels and exactly four home directories would hand over the shape of the
+# game to anyone who runs ls /home.
+noise_users: 7
