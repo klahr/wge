@@ -80,7 +80,7 @@ type Limits struct {
 var multiUserCaps = []string{
 	"SETUID", "SETGID",
 	"CHOWN", "FOWNER", "FSETID", "DAC_OVERRIDE",
-	"KILL", "AUDIT_WRITE", "NET_BIND_SERVICE",
+	"KILL", "AUDIT_WRITE", "NET_BIND_SERVICE", "SYS_CHROOT",
 }
 
 // DefaultLimits are deliberately tight. A player needs a shell, not a build farm.
@@ -197,6 +197,14 @@ func NewDocker(opts Options) (*Docker, error) {
 	return d, nil
 }
 
+// networkMode is the network a container is created on.
+func networkMode(networks []string) string {
+	if len(networks) == 0 {
+		return "none"
+	}
+	return networks[0]
+}
+
 // ContainerName is the container backing one host of one run. Deriving it from
 // the run id rather than tracking it in a table means a crashed broker can
 // still find, reuse and reap what it left behind.
@@ -204,26 +212,32 @@ func ContainerName(runID int64, host string) string {
 	return fmt.Sprintf("wge-run-%d-%s", runID, host)
 }
 
-// Attach gives the player a shell on their level, creating the container first
-// if this is their first connection since it was last reaped.
+// Attach gives the player a shell on their level, building the run's machines
+// first if this is their first connection since they were last reaped.
 func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
-	image, err := d.images.Image(s.Game.ID, s.Run.GameVersion, s.Level.Host)
-	if err != nil {
-		return 0, fmt.Errorf("resolve image: %w", err)
+	plan := planTopology(s.Game, s.Run.ID)
+
+	// Every container in the run is claimed, not just the one the player lands
+	// on. Pivoting needs the peers to be up, and a peer nothing is holding
+	// would be taken by the next sweep while the player was still on the first
+	// box looking for the way across.
+	var held []target
+	for _, host := range plan.hosts {
+		t := target{Name: ContainerName(s.Run.ID, host), RunID: s.Run.ID}
+		d.reaper.hold(t)
+		held = append(held, t)
+	}
+	defer func() {
+		for _, t := range held {
+			d.reaper.release(t)
+		}
+	}()
+
+	if err := d.ensureTopology(ctx, s, plan); err != nil {
+		return 0, err
 	}
 
 	name := ContainerName(s.Run.ID, s.Level.Host)
-	spot := target{Name: name, RunID: s.Run.ID}
-
-	// Claimed before the container is created, not after: a sweep running in
-	// the gap would find a container nothing is holding and destroy it while
-	// the session that asked for it was still starting.
-	d.reaper.hold(spot)
-	defer d.reaper.release(spot)
-
-	if err := d.ensureContainer(ctx, name, image, s); err != nil {
-		return 0, err
-	}
 
 	execID, err := d.createExec(ctx, name, s)
 	if err != nil {
@@ -236,9 +250,34 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 	return d.execExitCode(ctx, execID)
 }
 
-// ensureContainer creates and starts the run's container if it is not already
-// running. Creation is idempotent by name.
-func (d *Docker) ensureContainer(ctx context.Context, name, image string, s *broker.Session) error {
+// ensureTopology brings up the run's networks and every machine on them.
+func (d *Docker) ensureTopology(ctx context.Context, s *broker.Session, plan topology) error {
+	labels := map[string]string{"wge.run": fmt.Sprint(s.Run.ID), "wge.game": s.Game.ID}
+
+	for _, network := range plan.networks {
+		if err := d.api.CreateNetwork(ctx, network, labels); err != nil {
+			return fmt.Errorf("create network %s: %w", network, err)
+		}
+	}
+
+	for _, host := range plan.hosts {
+		if err := d.ensureContainer(ctx, s, host, plan.byHost[host]); err != nil {
+			return fmt.Errorf("host %s: %w", host, err)
+		}
+	}
+	return nil
+}
+
+// ensureContainer creates and starts one of a run's machines if it is not
+// already up. Creation is idempotent by name.
+func (d *Docker) ensureContainer(ctx context.Context, s *broker.Session, host string, networks []string) error {
+	name := ContainerName(s.Run.ID, host)
+
+	image, err := d.images.Image(s.Game.ID, s.Run.GameVersion, host)
+	if err != nil {
+		return fmt.Errorf("resolve image: %w", err)
+	}
+
 	mu, _ := d.creating.LoadOrStore(name, &sync.Mutex{})
 	lock := mu.(*sync.Mutex)
 	lock.Lock()
@@ -258,22 +297,31 @@ func (d *Docker) ensureContainer(ctx context.Context, name, image string, s *bro
 		return fmt.Errorf("inspect container: %w", err)
 	}
 
-	if err := d.create(ctx, name, image, s); err != nil {
+	if err := d.create(ctx, name, image, host, networks, s); err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
 	if err := d.api.Post(ctx, "/containers/"+name+"/start", nil, nil); err != nil {
 		return fmt.Errorf("start container: %w", err)
 	}
 
+	// The first network is attached at creation; the rest have to be joined
+	// afterwards. The alias is the host's name, which is what makes `ssh vault`
+	// resolve from another machine in the run and nowhere else.
+	for _, network := range networks[min(1, len(networks)):] {
+		if err := d.api.ConnectNetwork(ctx, network, name, []string{host}); err != nil {
+			return fmt.Errorf("join network %s: %w", network, err)
+		}
+	}
+
 	// Seed before anyone can reach the box. The player has no way to run
-	// anything until the attach below, so the window between start and seed is
-	// not observable from inside -- but it must still be closed before the
-	// first exec, or they arrive to find templates where the game should be.
+	// anything until the attach, so the window between start and seed is not
+	// observable from inside -- but it must still be closed before the first
+	// exec, or they arrive to find templates where the game should be.
 	seedCtx, cancel := context.WithTimeout(ctx, build.SeedTimeout)
 	defer cancel()
 
 	secrets := build.NewRunSecrets(s.Game, s.Run.Deriver(), s.Player.Handle)
-	if err := d.seeder.Seed(seedCtx, name, s.Game, s.Level.Host, secrets); err != nil {
+	if err := d.seeder.Seed(seedCtx, name, s.Game, host, secrets); err != nil {
 		// A half-seeded container is worse than none: remove it so the next
 		// attempt builds a clean one rather than reusing this.
 		if rmErr := d.remove(ctx, name); rmErr != nil && !docker.IsNotFound(rmErr) {
@@ -289,11 +337,54 @@ func (d *Docker) ensureContainer(ctx context.Context, name, image string, s *bro
 		}
 	}
 
-	d.log.Info("container created", "name", name, "image", image, "run", s.Run.ID)
+	// Wait for init to finish before anyone can look at the machine. A player
+	// who lands on a box mid-boot finds its services reported as not running,
+	// and one who already knows the way across finds the peer refusing
+	// connections -- both of which are the engine's startup showing through.
+	d.waitForBoot(ctx, name)
+
+	d.log.Info("machine created", "name", name, "image", image, "host", host, "run", s.Run.ID)
 	return nil
 }
 
-// destroy removes a container whose grace period has run out.
+// BootTimeout bounds how long a machine is given to finish starting.
+const BootTimeout = 25 * time.Second
+
+// waitForBoot blocks until the container's init has run the boot sequence out.
+//
+// sysvinit's rc script is the whole of it: while that process is alive the
+// runlevel is still being entered, and when it exits every service that is
+// going to start has started.
+func (d *Docker) waitForBoot(ctx context.Context, name string) {
+	ctx, cancel := context.WithTimeout(ctx, BootTimeout)
+	defer cancel()
+
+	const check = `pgrep -f "/etc/init.d/rc " >/dev/null 2>&1 && exit 1; exit 0`
+
+	for {
+		res, err := d.api.Exec(ctx, name, docker.ExecOptions{
+			Cmd: []string{"sh", "-c", check}, User: "root",
+		})
+		if err == nil && res.ExitCode == 0 {
+			return
+		}
+		if err != nil {
+			// The container may not be accepting execs yet; that is itself a
+			// reason to keep waiting.
+			d.log.Debug("waiting for boot", "name", name, "error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			d.log.Warn("machine did not finish booting in time", "name", name)
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
+
+// destroy removes a container whose grace period has run out, and the run's
+// networks once its last machine is gone.
 func (d *Docker) destroy(t target) {
 	// Deliberately not the session's context: the session is what ended.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -306,25 +397,31 @@ func (d *Docker) destroy(t target) {
 	d.reaper.forget(t.Name)
 	d.creating.Delete(t.Name)
 
-	// A run spanning several hosts keeps its placement until the last of its
-	// containers is gone.
+	// A run spanning several machines keeps its placement, and its networks,
+	// until the last of them is gone.
 	remaining, err := d.api.ListContainers(ctx, fmt.Sprintf("wge.run=%d", t.RunID))
 	if err != nil {
 		d.log.Error("count remaining containers", "run", t.RunID, "error", err)
 		return
 	}
-	if len(remaining) == 0 && d.runs != nil {
+	if len(remaining) > 0 {
+		return
+	}
+
+	d.removeNetworks(ctx, t.RunID)
+
+	if d.runs != nil {
 		if err := d.runs.SetHost(ctx, t.RunID, ""); err != nil {
 			d.log.Error("clear run placement", "run", t.RunID, "error", err)
 		}
 	}
 
-	d.log.Info("container reaped", "name", t.Name, "run", t.RunID)
+	d.log.Info("run reaped", "run", t.RunID)
 }
 
-// Run collects abandoned containers until the context is cancelled.
+// Run collects abandoned machines until the context is cancelled.
 //
-// The first sweep happens immediately, which means a starting engine destroys
+// The first sweep happens immediately, which means a starting engine clears
 // whatever a previous process left behind. That is the right thing rather than
 // a compromise: nothing knows whether those containers still have players
 // behind them, and rebuilding one costs a reconnection.
@@ -345,7 +442,8 @@ func (d *Docker) Run(ctx context.Context) {
 	}
 }
 
-// sweepOnce destroys every game container no session is holding.
+// sweepOnce destroys every game container no session is holding, and then any
+// network left with nothing on it.
 func (d *Docker) sweepOnce(ctx context.Context) {
 	containers, err := d.api.ListContainers(ctx, "wge.run")
 	if err != nil {
@@ -354,9 +452,11 @@ func (d *Docker) sweepOnce(ctx context.Context) {
 	}
 
 	held := d.reaper.heldNames()
+	liveRuns := map[int64]bool{}
+
 	for _, c := range containers {
 		name := c.Name()
-		if name == "" || held[name] {
+		if name == "" {
 			continue
 		}
 
@@ -365,9 +465,49 @@ func (d *Docker) sweepOnce(ctx context.Context) {
 			d.log.Error("container has an unreadable run label", "name", name, "label", c.Labels["wge.run"])
 			continue
 		}
+		if held[name] {
+			liveRuns[runID] = true
+			continue
+		}
 
-		d.log.Info("collecting abandoned container", "name", name, "run", runID)
+		d.log.Info("collecting abandoned machine", "name", name, "run", runID)
 		d.destroy(target{Name: name, RunID: runID})
+	}
+
+	d.sweepNetworks(ctx, liveRuns)
+}
+
+// sweepNetworks removes the networks of runs that have no machines left.
+func (d *Docker) sweepNetworks(ctx context.Context, liveRuns map[int64]bool) {
+	networks, err := d.api.ListNetworks(ctx, "wge.run")
+	if err != nil {
+		d.log.Error("sweep networks", "error", err)
+		return
+	}
+
+	for _, network := range networks {
+		runID, err := strconv.ParseInt(network.Labels["wge.run"], 10, 64)
+		if err != nil || liveRuns[runID] {
+			continue
+		}
+		if err := d.api.RemoveNetwork(ctx, network.Name); err != nil && !docker.IsNotFound(err) {
+			d.log.Debug("remove abandoned network", "name", network.Name, "error", err)
+		}
+	}
+}
+
+// removeNetworks deletes a run's private networks. Nothing may be attached to
+// a network for it to go, which is why the containers are removed first.
+func (d *Docker) removeNetworks(ctx context.Context, runID int64) {
+	networks, err := d.api.ListNetworks(ctx, fmt.Sprintf("wge.run=%d", runID))
+	if err != nil {
+		d.log.Error("list run networks", "run", runID, "error", err)
+		return
+	}
+	for _, network := range networks {
+		if err := d.api.RemoveNetwork(ctx, network.Name); err != nil && !docker.IsNotFound(err) {
+			d.log.Error("remove network", "name", network.Name, "error", err)
+		}
 	}
 }
 
@@ -385,10 +525,10 @@ func (d *Docker) inspectState(ctx context.Context, name string) (containerState,
 	return resp.State, err
 }
 
-func (d *Docker) create(ctx context.Context, name, image string, s *broker.Session) error {
+func (d *Docker) create(ctx context.Context, name, image, host string, networks []string, s *broker.Session) error {
 	body := map[string]any{
 		"Image":        image,
-		"Hostname":     s.Level.Host,
+		"Hostname":     host,
 		"Tty":          false,
 		"OpenStdin":    false,
 		"AttachStdout": false,
@@ -398,9 +538,17 @@ func (d *Docker) create(ctx context.Context, name, image string, s *broker.Sessi
 		"Labels": map[string]string{
 			"wge.run":  fmt.Sprint(s.Run.ID),
 			"wge.game": s.Game.ID,
-			"wge.host": s.Level.Host,
+			"wge.host": host,
 		},
-		"HostConfig": d.hostConfig(),
+		"HostConfig": d.hostConfig(networks),
+	}
+
+	if len(networks) > 0 {
+		body["NetworkingConfig"] = map[string]any{
+			"EndpointsConfig": map[string]any{
+				networks[0]: map[string]any{"Aliases": []string{host}},
+			},
+		}
 	}
 
 	q := url.Values{"name": {name}}
@@ -409,7 +557,7 @@ func (d *Docker) create(ctx context.Context, name, image string, s *broker.Sessi
 
 // hostConfig is the sandbox. Every field here exists because the container is
 // hostile by design: the player is invited to attack it.
-func (d *Docker) hostConfig() map[string]any {
+func (d *Docker) hostConfig(networks []string) map[string]any {
 	caps := d.limits.Capabilities
 	if caps == nil {
 		caps = multiUserCaps
@@ -436,10 +584,11 @@ func (d *Docker) hostConfig() map[string]any {
 		// setuid audit in `wge test`, which proves the box carries exactly the
 		// setuid binaries the base image ships and nothing an author added by
 		// accident.
-		// No egress. An unfiltered shell box on the internet becomes someone
-		// else's spam relay within the week. Multi-host games attach a private
-		// per-run network instead of the default bridge.
-		"NetworkMode": "none",
+		// No route off the run. A lone machine gets no network at all; a run
+		// with several gets private internal networks, which have no path to
+		// the host or the internet. An unfiltered shell box becomes somebody
+		// else's spam relay within the week.
+		"NetworkMode": networkMode(networks),
 		"Memory":      d.limits.Memory,
 		"NanoCpus":    d.limits.NanoCPUs,
 		"PidsLimit":   d.limits.PidsLimit,

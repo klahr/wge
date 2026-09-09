@@ -85,7 +85,7 @@ type Plan struct {
 // Assemble builds the plan for one host of a game without touching Docker, so
 // it can be inspected and tested on its own.
 func Assemble(g *manifest.Game, host string, anchor time.Time) (*Plan, error) {
-	accounts, err := planAccounts(g)
+	accounts, err := planAccounts(g, host)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +104,9 @@ func Assemble(g *manifest.Game, host string, anchor time.Time) (*Plan, error) {
 		if err := p.addAccount(acct); err != nil {
 			return nil, err
 		}
+	}
+	if err := p.addHostKeys(); err != nil {
+		return nil, err
 	}
 	if err := p.addServices(); err != nil {
 		return nil, err
@@ -324,23 +327,33 @@ func (p *Plan) addSystemFiles() error {
 		p.rootfs.addMeta(name, p.Aging.FileTime(Owner{User: "root"}, name))
 	}
 
-	if _, ok := p.entryLevelMOTD(); ok {
+	if _, ok := p.hostMOTD(); ok {
 		p.rootfs.addFile("/etc/motd", []byte(p.motd()), 0o644, root,
 			p.Aging.FileTime(Owner{User: "root"}, "/etc/motd"))
 	}
 	return nil
 }
 
-func (p *Plan) entryLevelMOTD() (string, bool) {
-	entry, ok := p.Game.Entry()
-	if !ok || strings.TrimSpace(entry.Narrative.MOTD) == "" {
-		return "", false
+// hostMOTD is the banner this machine greets a login with.
+//
+// It has to come from a level that lives here. Putting the entry level's motd
+// on every host would have the document store introduce itself as the mail
+// relay, which is a contradiction on the first line a player reads.
+func (p *Plan) hostMOTD() (string, bool) {
+	if entry, ok := p.Game.Entry(); ok && entry.Host == p.Host &&
+		strings.TrimSpace(entry.Narrative.MOTD) != "" {
+		return entry.Narrative.MOTD, true
 	}
-	return entry.Narrative.MOTD, true
+	for _, l := range p.Game.Levels {
+		if l.Host == p.Host && strings.TrimSpace(l.Narrative.MOTD) != "" {
+			return l.Narrative.MOTD, true
+		}
+	}
+	return "", false
 }
 
 func (p *Plan) motd() string {
-	text, _ := p.entryLevelMOTD()
+	text, _ := p.hostMOTD()
 	return strings.TrimRight(text, "\n") + "\n"
 }
 

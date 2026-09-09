@@ -60,14 +60,28 @@ var noiseNames = []struct {
 	{"ostrand", "Olle Strand", RoleOps},
 }
 
-// planAccounts decides every account on the box: the levels, the services they
-// declare, and the decoys.
-func planAccounts(g *manifest.Game) ([]*account, error) {
+// planAccounts decides every account on one machine: the levels that live
+// here, the services they declare, and the decoys.
+//
+// Scoping to the host matters. A level's home directory is laid down for its
+// account, so an account that exists on every machine puts that level's files
+// on every machine -- which on a multi-host game means the final level's payoff
+// sitting on the box the player starts from. Permissions still hide it, but
+// content that has no business being there is one chmod away from being a leak,
+// and a player who finds a document store carrying the mailroom's notes has
+// learned the machines are not really separate.
+//
+// Decoys stay everywhere: the same company's staff plausibly have accounts on
+// both machines.
+func planAccounts(g *manifest.Game, host string) ([]*account, error) {
 	var accounts []*account
 	taken := map[string]bool{}
 	uids := newUIDPool()
 
 	for _, l := range g.Levels {
+		if l.Host != host {
+			continue
+		}
 		if taken[l.User] {
 			return nil, fmt.Errorf("account %q is claimed twice", l.User)
 		}
@@ -84,6 +98,9 @@ func planAccounts(g *manifest.Game) ([]*account, error) {
 	}
 
 	for _, l := range g.Levels {
+		if l.Host != host {
+			continue
+		}
 		for _, s := range l.Services {
 			if taken[s.User] {
 				continue

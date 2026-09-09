@@ -139,8 +139,11 @@ func (v *Verifier) start(ctx context.Context, container, image, host string) err
 		"Hostname": host,
 		"Labels":   map[string]string{"wge.verify": "1"},
 		"HostConfig": map[string]any{
-			"CapDrop":     []string{"ALL"},
-			"CapAdd":      []string{"SETUID", "SETGID", "CHOWN", "FOWNER", "FSETID", "DAC_OVERRIDE", "AUDIT_WRITE"},
+			"CapDrop": []string{"ALL"},
+			"CapAdd": []string{
+				"SETUID", "SETGID", "CHOWN", "FOWNER", "FSETID",
+				"DAC_OVERRIDE", "KILL", "AUDIT_WRITE", "NET_BIND_SERVICE", "SYS_CHROOT",
+			},
 			"NetworkMode": "none",
 			"AutoRemove":  false,
 		},

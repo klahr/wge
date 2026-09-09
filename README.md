@@ -239,6 +239,48 @@ ssh enroll@localhost -p 2222      # register, and collect the first password
 ssh heist@localhost -p 2222       # play
 ```
 
+## Multi-host runs
+
+A game can span several machines, and pivoting between them is the point:
+
+```yaml
+hosts:
+  - id: relay2
+    external: true        # the machine the front door will attach you to
+    peers: [vault]
+  - id: vault             # not on the internet; reached from something that
+    packages: [sqlite3]   # can already see it
+```
+
+Each host is a separate image and a separate container, joined by private
+**internal** networks — no route to the host or the internet, and Docker's
+resolver answers the host id, so `ssh dsundqvist@vault` works from the relay and
+nowhere else. Every machine in a run is built when a player connects, not lazily
+when they reach a level on it: `ssh vault` has to answer the first time it is
+typed.
+
+`external` is what makes the segmentation mean something. Without it a player
+holding a credential for an internal machine could present it at the front door
+and land there directly, and the private networks would be decoration. A machine
+that is not external is reached the way it would be on a real network.
+
+`peers` is reachability, and it is mutual rather than one-way: it is implemented
+as shared networks, and a network cannot be traversed in one direction only. A
+host that declares no peers can reach every other host. When the reachability
+graph is complete the run shares one network; when it is not, there is one
+network per adjacent pair, since membership is the only way a Docker network can
+express segmentation.
+
+Host keys are derived from the game rather than the run, so a reaped and rebuilt
+machine keeps its identity — no `REMOTE HOST IDENTIFICATION HAS CHANGED` from
+the engine's own lifecycle — and a game can ship a `known_hosts` that is
+actually correct, via `{{ .HostKey "vault" }}`.
+
+Accounts are scoped to the machine their level lives on. An account that existed
+everywhere would put its level's home directory on every machine, which on a
+multi-host game means the final level's payoff sitting on the box the player
+starts from.
+
 ## Container lifecycle
 
 Containers are created when a player connects and destroyed when they stop
@@ -343,11 +385,13 @@ Next, roughly in order:
    it already knows whether a player is circling or stalled — no in-container
    agent to find or tamper with. Hints arrive as mail from an in-fiction
    correspondent, escalating in tiers, and unprompted when a player stalls.
-3. **Multi-host runs.** The schema has `hosts:` and `egress:`, levels carry a
-   `host:`, and images are tagged per host — but a run is still one container,
-   there is no per-run network, and `egress` is declared and never enforced.
-   This is what makes pivoting possible, and it is where the realism ceiling
-   currently sits.
+3. **Progress for in-run transitions.** The broker records a level when it
+   attaches a player to it, so a level reached by `su` or by pivoting to
+   another machine is never recorded — which for an internal host means never
+   at all, since the front door will not attach there. The box already knows:
+   the answer is to read the login databases (`/var/log/wtmp.db`) back out of
+   each container and take any session later than the container's creation as
+   real. No in-container agent, and nothing for a player to find.
 4. **Scratch persistence.** A reap currently loses whatever the player wrote. A
    small per-run volume mounted somewhere they keep notes would cost little and
    remove the one real sting.

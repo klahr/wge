@@ -30,7 +30,7 @@ RUN apt-get update \
       less vim-tiny nano file bsdextrautils \
       iproute2 netcat-openbsd \
       bsd-mailx openssh-client ca-certificates \
-      sudo man-db inetutils-syslogd \
+      sudo man-db inetutils-syslogd openssh-server \
  && apt-get purge -y --auto-remove systemd \
  && rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log \
       /var/log/alternatives.log
@@ -40,6 +40,11 @@ RUN apt-get update \
 # and permanently dead. The traditional syslogd is also the more plausible
 # choice for a machine of this vintage, and its stock syslog.conf writes
 # auth.log and syslog exactly where the aging pass puts their history.
+
+# The host keys openssh generates at install time would be identical on every
+# machine in every game. Each game image derives its own instead, so two hosts
+# in one run do not share a fingerprint and a rebuilt box keeps its identity.
+RUN rm -f /etc/ssh/ssh_host_*
 
 # There are no consoles here, so the gettys in inittab would respawn and fail
 # forever. Everything else in inittab is left as Debian ships it.

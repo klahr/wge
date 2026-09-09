@@ -80,11 +80,16 @@ func TestDefaultCapabilitiesPermitPrivilegeDropping(t *testing.T) {
 	if !contains(caps, "CHOWN") {
 		t.Error("CHOWN is missing; chpasswd cannot write /etc/shadow and seeding fails")
 	}
+	// sshd chroots to /run/sshd before authentication and cannot be told not
+	// to, so without this no player can pivot between machines.
+	if !contains(caps, "SYS_CHROOT") {
+		t.Error("SYS_CHROOT is missing; sshd privilege separation fails and pivoting is impossible")
+	}
 	// Anything that grants reach beyond the container must stay dropped.
 	// What must stay dropped is what gets a player off the box or onto the
 	// network -- not what uid 0 needs to administer the box itself.
 	for _, forbidden := range []string{
-		"SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_CHROOT", "SYS_BOOT",
+		"SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_BOOT",
 		"NET_ADMIN", "NET_RAW", "MKNOD", "SETFCAP", "SETPCAP", "ALL",
 	} {
 		if contains(caps, forbidden) {
@@ -95,8 +100,9 @@ func TestDefaultCapabilitiesPermitPrivilegeDropping(t *testing.T) {
 
 func TestSandboxDefaults(t *testing.T) {
 	d := &Docker{limits: DefaultLimits()}
-	cfg := d.hostConfig()
+	cfg := d.hostConfig(nil)
 
+	// A lone machine gets no network at all.
 	if got := cfg["NetworkMode"]; got != "none" {
 		t.Errorf("NetworkMode = %v; an unfiltered game box becomes someone's relay", got)
 	}
@@ -113,6 +119,17 @@ func TestSandboxDefaults(t *testing.T) {
 	// bit, which breaks su(1) and with it the move between levels.
 	if opt, ok := cfg["SecurityOpt"]; ok {
 		t.Errorf("SecurityOpt = %v; no-new-privileges breaks su and sudo on a multi-user box", opt)
+	}
+}
+
+// A run with several machines gets private internal networks instead, which
+// still have no route to the host or the internet.
+func TestMultiHostRunJoinsItsPrivateNetwork(t *testing.T) {
+	d := &Docker{limits: DefaultLimits()}
+	cfg := d.hostConfig([]string{"wge-run-1-net", "wge-run-1-a-b"})
+
+	if got := cfg["NetworkMode"]; got != "wge-run-1-net" {
+		t.Errorf("NetworkMode = %v, want the run's first network", got)
 	}
 }
 

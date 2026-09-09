@@ -212,15 +212,72 @@ func TestUnknownHostIsRejected(t *testing.T) {
 	mustFail(t, g, `unknown host "nowhere"`)
 }
 
-func TestHostEgressMustNameKnownHosts(t *testing.T) {
+func TestHostPeersMustNameKnownHosts(t *testing.T) {
 	g := valid()
 	g.Hosts = []*Host{
-		{ID: "mailsrv", Base: "wge/debian-13", Egress: []string{"vault"}},
+		{ID: "mailsrv", Base: "wge/debian-13", Peers: []string{"vault"}},
 	}
 	for _, l := range g.Levels {
 		l.Host = "mailsrv"
 	}
-	mustFail(t, g, `egress to unknown host "vault"`)
+	mustFail(t, g, `unknown peer "vault"`)
+}
+
+// A credential is no use if it opens a machine the player cannot reach from
+// where they found it.
+func TestCredentialForAnUnreachableHostIsRejected(t *testing.T) {
+	g := valid()
+	g.Hosts = []*Host{
+		{ID: "relay", Base: "wge/debian-13", Peers: []string{"office"}},
+		{ID: "office", Base: "wge/debian-13"},
+		{ID: "vault", Base: "wge/debian-13", Peers: []string{"office"}},
+	}
+	for _, l := range g.Levels {
+		l.Host = "relay"
+	}
+	// sysadmin moves to the vault, which relay cannot reach.
+	g.Levels[3].Host = "vault"
+	mustFail(t, g, "which it cannot reach")
+
+	// Declaring the peer settles it.
+	g.Hosts[0].Peers = []string{"office", "vault"}
+	if err := g.Validate(); err != nil {
+		t.Fatalf("expected a reachable host to validate: %v", err)
+	}
+}
+
+// Reachability is mutual: declaring the peer on either side is enough.
+func TestPeerDeclarationIsSymmetric(t *testing.T) {
+	g := valid()
+	g.Hosts = []*Host{
+		{ID: "relay", Base: "wge/debian-13"},
+		{ID: "vault", Base: "wge/debian-13", Peers: []string{"relay"}},
+	}
+	adjacent := g.Adjacency()
+	if !adjacent["relay"]["vault"] || !adjacent["vault"]["relay"] {
+		t.Fatalf("adjacency is not mutual: %+v", adjacent)
+	}
+}
+
+// A game that says nothing about its network has every host reachable.
+func TestUndeclaredPeersMeanFullReachability(t *testing.T) {
+	g := valid()
+	g.Hosts = []*Host{
+		{ID: "a", Base: "wge/debian-13"},
+		{ID: "b", Base: "wge/debian-13"},
+		{ID: "c", Base: "wge/debian-13"},
+	}
+	adjacent := g.Adjacency()
+	for _, from := range []string{"a", "b", "c"} {
+		for _, to := range []string{"a", "b", "c"} {
+			if from == to {
+				continue
+			}
+			if !adjacent[from][to] {
+				t.Errorf("%s cannot reach %s, but neither declared peers", from, to)
+			}
+		}
+	}
 }
 
 func TestInvalidIdentifiers(t *testing.T) {

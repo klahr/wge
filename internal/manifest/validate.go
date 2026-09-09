@@ -89,15 +89,20 @@ func (g *Game) validateHosts() Errors {
 		}
 	}
 	for _, h := range g.Hosts {
-		for _, peer := range h.Egress {
+		for _, peer := range h.Peers {
 			switch {
 			case peer == h.ID:
-				errs = append(errs, fmt.Errorf("host %q lists itself in egress", h.ID))
+				errs = append(errs, fmt.Errorf("host %q lists itself as a peer", h.ID))
 			case !seen[peer]:
-				errs = append(errs, fmt.Errorf("host %q allows egress to unknown host %q", h.ID, peer))
+				errs = append(errs, fmt.Errorf("host %q lists unknown peer %q", h.ID, peer))
 			}
 		}
 	}
+
+	// A level has to be reachable from where the player is standing when they
+	// earn its credential, or the credential opens a machine they cannot get to.
+	errs = append(errs, g.validateHostReachability()...)
+	errs = append(errs, g.validateEntryIsReachable()...)
 	return errs
 }
 
@@ -506,4 +511,93 @@ func (g *Game) validateCron() Errors {
 		}
 	}
 	return errs
+}
+
+// Adjacency returns which hosts can reach which, as an undirected graph.
+//
+// A host that declares no peers can reach everything; one that declares them
+// is restricted to what it named, plus anything that named it.
+func (g *Game) Adjacency() map[string]map[string]bool {
+	ids := g.HostIDs()
+	adjacent := make(map[string]map[string]bool, len(ids))
+	for _, id := range ids {
+		adjacent[id] = map[string]bool{}
+	}
+
+	declared := map[string]bool{}
+	for _, h := range g.Hosts {
+		if len(h.Peers) > 0 {
+			declared[h.ID] = true
+		}
+	}
+
+	for _, h := range g.Hosts {
+		for _, peer := range h.Peers {
+			if adjacent[h.ID] == nil || adjacent[peer] == nil {
+				continue
+			}
+			adjacent[h.ID][peer] = true
+			adjacent[peer][h.ID] = true
+		}
+	}
+
+	// Hosts that named nobody are on the open part of the network.
+	for _, a := range ids {
+		if declared[a] {
+			continue
+		}
+		for _, b := range ids {
+			if a == b || declared[b] {
+				continue
+			}
+			adjacent[a][b] = true
+			adjacent[b][a] = true
+		}
+	}
+	return adjacent
+}
+
+// validateHostReachability checks that a credential opens a machine the player
+// can actually get to from where they find it.
+func (g *Game) validateHostReachability() Errors {
+	if len(g.Hosts) < 2 {
+		return nil
+	}
+
+	adjacent := g.Adjacency()
+	var errs Errors
+
+	for _, l := range g.Levels {
+		for _, gr := range l.Grants {
+			target, ok := g.Level(gr.To)
+			if !ok || target.Host == l.Host {
+				continue
+			}
+			if !adjacent[l.Host][target.Host] {
+				errs = append(errs, fmt.Errorf(
+					"level %s on host %s grants a credential for level %s on host %s, which it cannot reach: declare %s as a peer of %s",
+					l.ID, l.Host, target.ID, target.Host, target.Host, l.Host))
+			}
+		}
+	}
+	return errs
+}
+
+// validateEntryIsReachable checks that a player can get in at all.
+func (g *Game) validateEntryIsReachable() Errors {
+	entry, ok := g.Entry()
+	if !ok {
+		return nil // already reported
+	}
+
+	external := g.ExternalHosts()
+	if len(external) == 0 {
+		return Errors{fmt.Errorf("no host is external: there is no way into this game")}
+	}
+	if !external[entry.Host] {
+		return Errors{fmt.Errorf(
+			"entry level %s is on host %s, which is not external: a player has no way to reach it",
+			entry.ID, entry.Host)}
+	}
+	return nil
 }

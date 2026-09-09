@@ -200,10 +200,12 @@ func (a *authenticator) levelKey(
 		d := run.Deriver()
 		marshalled := offered.Marshal()
 
+		external := game.ExternalHosts()
+
 		for _, l := range game.Levels {
 			// Only levels the game actually opens with a key. Every level has a
 			// derived key, but one the game never places is not a credential.
-			if !game.ReceivesKey(l.ID) {
+			if !game.ReceivesKey(l.ID) || !external[l.Host] {
 				continue
 			}
 
@@ -237,7 +239,11 @@ func (a *authenticator) levelPassword(
 	fingerprint string, player *store.Player, game *manifest.Game, run *store.Run,
 ) func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
 	return func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-		levelID, ok := run.Deriver().Match(game.LevelIDs(), string(password))
+		// Only levels on machines the front door can see. A credential for an
+		// internal machine is not refused because it is wrong -- it is refused
+		// because that machine is not on the internet, and reaching it is the
+		// puzzle.
+		levelID, ok := run.Deriver().Match(game.ExternalLevelIDs(), string(password))
 		if !ok {
 			a.log.Info("level password rejected",
 				"handle", player.Handle, "game", game.ID,

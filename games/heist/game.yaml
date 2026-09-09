@@ -9,13 +9,22 @@ synopsis: >
 base: wge/debian-13
 
 hosts:
-  # The machine's name. Its own motd calls it "mail relay 2", so anything else
-  # would contradict the box on the first line a player reads.
+  # The mail relay. Its own motd calls it "mail relay 2", so anything else
+  # would contradict the box on the first line a player reads. This is the
+  # machine on the internet, and the only one the front door will let anyone
+  # onto.
   - id: relay2
+    external: true
+    peers: [vault]
 
+  # The document store. Not on the internet: the only way onto it is from
+  # something that can already see it, which is the relay.
+  - id: vault
+    packages: [sqlite3]
+
+# Installed on every host. A machine can add its own.
 packages:
   - postfix
-  - sqlite3
   - vim-tiny
   - less
   - tcpdump

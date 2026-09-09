@@ -77,7 +77,33 @@ type harness struct {
 	game    *manifest.Game
 }
 
+// keyGame is a minimal single-host game whose second level is opened by an SSH
+// key. The reference game's key-opened level lives on an internal machine and
+// is deliberately unreachable from the front door, so the key tests need a game
+// whose perimeter is not the thing under test.
+func keyGame() *manifest.Game {
+	return &manifest.Game{
+		ID: "keygame", Version: 1, Title: "Key Fixture",
+		Base: "wge/debian-13",
+		Levels: []*manifest.Level{
+			{
+				ID: "front", User: "alpha", Host: manifest.DefaultHostID,
+				Grants: []manifest.Grant{{
+					Kind: manifest.GrantSSHKey, To: "back",
+					PlacedIn: "/home/alpha/id_ed25519",
+				}},
+			},
+			{ID: "back", User: "beta", Host: manifest.DefaultHostID, Requires: []string{"front"}},
+		},
+	}
+}
+
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWith(t, testGame())
+}
+
+func newHarnessWith(t *testing.T, game *manifest.Game) *harness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -88,7 +114,6 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	game := testGame()
 	rt := &fakeRuntime{}
 
 	srv, err := New(Config{
@@ -254,15 +279,39 @@ func TestAnyHeldCredentialSelectsItsLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Jump straight to the final level using its derived password.
-	client, err := h.dial(t, key, ssh.Password(run.Deriver().Password("sysadmin")))
+	// Jump past the entry level using a credential for a later one.
+	client, err := h.dial(t, key, ssh.Password(run.Deriver().Password("ops-oncall")))
 	if err != nil {
-		t.Fatalf("dial with final password: %v", err)
+		t.Fatalf("dial with a later level's password: %v", err)
 	}
 	defer client.Close()
 
-	if out := runShell(t, client); !strings.Contains(out, "attached:sysadmin:dsundqvist") {
-		t.Fatalf("expected the sysadmin level, got:\n%s", out)
+	if out := runShell(t, client); !strings.Contains(out, "attached:ops-oncall:oncall") {
+		t.Fatalf("expected the ops-oncall level, got:\n%s", out)
+	}
+}
+
+// A machine that is not on the internet is not reachable from the front door,
+// however good the credential. Reaching it is the puzzle.
+func TestInternalLevelIsNotReachableFromTheFrontDoor(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	key := newSigner(t)
+	h.enroll(t, key, "rook")
+
+	player, _ := h.store.PlayerByKey(ctx, ssh.FingerprintSHA256(key.PublicKey()))
+	run, _ := h.store.Run(ctx, player.ID, h.game.ID)
+
+	sysadmin, ok := h.game.Level("sysadmin")
+	if !ok {
+		t.Fatal("the reference game has no sysadmin level")
+	}
+	if h.game.ExternalHosts()[sysadmin.Host] {
+		t.Skipf("host %s is external; nothing to test", sysadmin.Host)
+	}
+
+	if _, err := h.dial(t, key, ssh.Password(run.Deriver().Password("sysadmin"))); err == nil {
+		t.Fatal("the front door attached a player to a machine that is not on the internet")
 	}
 }
 
@@ -319,7 +368,7 @@ func TestUnknownKeyCannotEnrollThroughAGame(t *testing.T) {
 // A level opened by an SSH key is entered by proving possession of that key.
 // The passphrase never reaches the server: the client decrypts locally.
 func TestLevelKeyOpensItsLevel(t *testing.T) {
-	h := newHarness(t)
+	h := newHarnessWith(t, keyGame())
 	ctx := context.Background()
 	playerKey := newSigner(t)
 	h.enroll(t, playerKey, "rook")
@@ -333,7 +382,7 @@ func TestLevelKeyOpensItsLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	levelKey, err := ssh.NewSignerFromKey(run.Deriver().SSHKey("sysadmin"))
+	levelKey, err := ssh.NewSignerFromKey(run.Deriver().SSHKey("back"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +401,7 @@ func TestLevelKeyOpensItsLevel(t *testing.T) {
 	}
 	defer client.Close()
 
-	if out := runShell(t, client); !strings.Contains(out, "attached:sysadmin:dsundqvist") {
+	if out := runShell(t, client); !strings.Contains(out, "attached:back:beta") {
 		t.Fatalf("expected the key to open its level, got:\n%s", out)
 	}
 }
@@ -360,7 +409,7 @@ func TestLevelKeyOpensItsLevel(t *testing.T) {
 // Another run's key must not open this one, exactly as another run's password
 // must not.
 func TestAnotherRunsLevelKeyIsRejected(t *testing.T) {
-	h := newHarness(t)
+	h := newHarnessWith(t, keyGame())
 	ctx := context.Background()
 
 	keyA, keyB := newSigner(t), newSigner(t)
@@ -369,7 +418,7 @@ func TestAnotherRunsLevelKeyIsRejected(t *testing.T) {
 
 	playerA, _ := h.store.PlayerByKey(ctx, ssh.FingerprintSHA256(keyA.PublicKey()))
 	runA, _ := h.store.Run(ctx, playerA.ID, h.game.ID)
-	levelKeyA, err := ssh.NewSignerFromKey(runA.Deriver().SSHKey("sysadmin"))
+	levelKeyA, err := ssh.NewSignerFromKey(runA.Deriver().SSHKey("back"))
 	if err != nil {
 		t.Fatal(err)
 	}

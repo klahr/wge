@@ -117,6 +117,17 @@ func (r *RunSecrets) UnencryptedPrivateKey(levelID string) (string, error) {
 	return string(pem.EncodeToMemory(block)), nil
 }
 
+// HostKey returns a host's public key as a known_hosts entry, so a game can
+// ship a known_hosts that is actually correct.
+func (r *RunSecrets) HostKey(host string) (string, error) {
+	for _, id := range r.game.HostIDs() {
+		if id == host {
+			return HostKeyLine(r.game.ID, r.game.Version, host)
+		}
+	}
+	return "", fmt.Errorf("no host %q", host)
+}
+
 // PublicKey returns a level's public key as an authorized_keys line.
 func (r *RunSecrets) PublicKey(levelID string) (string, error) {
 	l, ok := r.game.Level(levelID)
@@ -380,7 +391,7 @@ func (s *Seeder) adoptExistingMetadata(ctx context.Context, container string, en
 // holding a credential would carry the container's start time and stand out
 // from everything around it.
 func RenderTemplates(g *manifest.Game, host string, anchor time.Time, secrets *RunSecrets) ([]entry, error) {
-	accounts, err := planAccounts(g)
+	accounts, err := planAccounts(g, host)
 	if err != nil {
 		return nil, err
 	}

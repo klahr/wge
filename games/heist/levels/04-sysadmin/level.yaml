@@ -1,6 +1,6 @@
 id: sysadmin
 user: dsundqvist
-host: relay2
+host: vault
 # Two prerequisites, satisfied by two different kinds of credential: the split
 # is what makes this a graph rather than a chain.
 requires: [backup-op, ops-oncall]
@@ -10,5 +10,5 @@ grants: []
 
 narrative:
   motd: |
-    You are logged in as dsundqvist.
-    Everything the forwarding rule touched is in this account.
+    Ardent Freight AB -- document store
+    Access is logged. Manifests are commercially sensitive.

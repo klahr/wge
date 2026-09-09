@@ -141,16 +141,37 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 func (t Timeline) Anchored() bool { return !t.Start.IsZero() }
 
 // Host is one machine in a run. A run of a multi-host game is a set of
-// containers on a private bridge network.
+// containers on private networks, with no route off the run at all.
 type Host struct {
 	ID       string   `yaml:"id"`
 	Base     string   `yaml:"base"`
 	Packages []string `yaml:"packages"`
 
-	// Egress lists the other hosts this one may reach. Anything not listed is
-	// dropped, as is all traffic leaving the run.
-	Egress []string `yaml:"egress"`
+	// Peers lists the other hosts this one shares a network with. Omit it and
+	// the host can reach every other host in the run.
+	//
+	// Reachability is mutual, not one-way. It is implemented as shared private
+	// networks, and a network cannot be traversed in only one direction; a
+	// field named for one-way egress would promise filtering the engine does
+	// not do. Declaring the peer on either side is enough.
+	Peers []string `yaml:"peers"`
+
+	// External marks a machine the front door will attach a player to.
+	//
+	// It is what makes a multi-host game about pivoting. Without it a player
+	// who finds a credential for an internal machine could present it at the
+	// front door and land there directly, and the private networks between
+	// hosts would be decoration. A machine that is not external is reached the
+	// way it would be on a real network: from something that can already see
+	// it.
+	//
+	// If no host declares it, every host is external -- a game that says
+	// nothing about its perimeter does not have one.
+	External bool `yaml:"external"`
 }
+
+// Hostname is the name this host answers to on the run's networks.
+func (h *Host) Hostname() string { return h.ID }
 
 // DefaultHostID is the implicit host of a single-host game.
 const DefaultHostID = "main"
@@ -403,6 +424,48 @@ func (g *Game) ReceivesKey(levelID string) bool {
 		}
 	}
 	return false
+}
+
+// ExternalHosts returns the machines the front door will attach a player to.
+func (g *Game) ExternalHosts() map[string]bool {
+	ids := g.HostIDs()
+
+	var declared bool
+	for _, h := range g.Hosts {
+		if h.External {
+			declared = true
+			break
+		}
+	}
+
+	out := make(map[string]bool, len(ids))
+	if !declared {
+		for _, id := range ids {
+			out[id] = true
+		}
+		return out
+	}
+
+	for _, h := range g.Hosts {
+		if h.External {
+			out[h.ID] = true
+		}
+	}
+	return out
+}
+
+// ExternalLevelIDs returns the levels whose credentials the front door accepts.
+// A credential for an internal machine has to be used from inside the run.
+func (g *Game) ExternalLevelIDs() []string {
+	external := g.ExternalHosts()
+
+	var ids []string
+	for _, l := range g.Levels {
+		if external[l.Host] {
+			ids = append(ids, l.ID)
+		}
+	}
+	return ids
 }
 
 // HostIDs returns every declared host, or the implicit default.
