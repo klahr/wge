@@ -214,3 +214,8 @@ func demultiplex(r io.Reader, stdout, stderr io.Writer) error {
 		}
 	}
 }
+
+// RemoveImage deletes an image by name or id.
+func (d *Client) RemoveImage(ctx context.Context, name string) error {
+	return d.Delete(ctx, "/images/"+url.PathEscape(name)+"?force=true")
+}

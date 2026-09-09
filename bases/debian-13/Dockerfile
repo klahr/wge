@@ -18,7 +18,8 @@ RUN apt-get update \
       s-nail openssh-client ca-certificates \
       wtmpdb lastlog2 \
       cron sudo man-db \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log \
+      /var/log/alternatives.log
 
 # Mail is the narrative vehicle, so the spool has to behave like a spool:
 # group-mail, setgid, and individual boxes readable only by their owner.

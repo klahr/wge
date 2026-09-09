@@ -57,6 +57,22 @@ func (a *Aging) Now() time.Time { return a.now }
 // Start is the oldest timestamp the box carries.
 func (a *Aging) Start() time.Time { return a.start }
 
+// Provisioned is when the machine itself was installed.
+//
+// Everything the base image contributes is dated from the image build -- which
+// is to say, today -- and a /usr full of files modified this afternoon says the
+// box was made this afternoon. Stamping them to a single provisioning date is
+// not a compromise: it is what a real install looks like, since package files
+// land together and only the ones with older upstream dates keep them.
+//
+// It sits comfortably before any account, so nobody is created on a machine
+// that did not yet exist.
+func (a *Aging) Provisioned() time.Time {
+	span := a.now.Sub(a.start)
+	back := scale(a.fraction("provisioned", a.seed), 5*float64(span), 7*float64(span))
+	return a.start.Add(-time.Duration(back))
+}
+
 // accountFiles are created when an account is created. On a real system they
 // carry the account's birth date and are never touched again, which makes them
 // one of the clearest tells when they don't.

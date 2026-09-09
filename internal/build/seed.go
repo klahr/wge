@@ -10,6 +10,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -143,6 +145,14 @@ func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, h
 	}
 
 	if len(rendered) > 0 {
+		// The image's permissions win. A tar header always carries a mode, so
+		// uploading the author's on-disk mode would silently undo whatever the
+		// level's setup.sh established -- and setup.sh is where a game's access
+		// control is expressed. Seeding replaces content, nothing else.
+		if err := s.adoptExistingMetadata(ctx, container, rendered); err != nil {
+			return err
+		}
+
 		archive, err := tarEntries(rendered)
 		if err != nil {
 			return fmt.Errorf("pack rendered files: %w", err)
@@ -155,39 +165,7 @@ func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, h
 	if err := s.setPasswords(ctx, container, g, host, secrets); err != nil {
 		return err
 	}
-	return s.restoreShadowTimes(ctx, container, g)
-}
-
-// restoreShadowTimes ages the account databases back after chpasswd.
-//
-// Seeding happens at container start, which is the real present, not the
-// fictional one. Left alone, /etc/shadow would be dated today on a box whose
-// logs stop months ago -- and it would be dated differently for every player,
-// which is worse: it times the container's creation to the minute.
-func (s *Seeder) restoreShadowTimes(ctx context.Context, container string, g *manifest.Game) error {
-	aging := NewAging(g.ID, g.Version, g.Timeline.Start, g.Timeline.Span)
-	owner := Owner{User: "root"}
-
-	// touch takes a single -d for the whole invocation, so each file needs its
-	// own call; one shell loop is cheaper than one exec per file.
-	var script strings.Builder
-	for _, name := range accountDatabases {
-		at := aging.FileTime(owner, name)
-		fmt.Fprintf(&script, "[ -e %s ] && touch -d @%d %s\n", name, at.Unix(), name)
-	}
-	script.WriteString("exit 0\n")
-
-	res, err := s.api.Exec(ctx, container, docker.ExecOptions{
-		Cmd:  []string{"sh", "-c", script.String()},
-		User: "root",
-	})
-	if err != nil {
-		return fmt.Errorf("age account databases: %w", err)
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("aging account databases exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
-	}
-	return nil
+	return s.restoreTimes(ctx, container, g, host, rendered)
 }
 
 // setPasswords writes the level accounts' passwords via chpasswd on stdin.
@@ -221,6 +199,168 @@ func (s *Seeder) setPasswords(ctx context.Context, container string, g *manifest
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("chpasswd exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// restoreTimes puts back every timestamp seeding disturbed.
+//
+// Seeding happens at container start, which is the real present and not the
+// fictional one, and it disturbs more than the files it writes. chpasswd
+// rewrites /etc/shadow; uploading a rendered file re-dates the directory that
+// holds it. Left alone, a home directory whose contents are months old sits
+// inside a folder modified sixty seconds ago -- and that timestamp is the
+// moment this player's container was created, which is a fact about the game
+// engine rather than about the box.
+func (s *Seeder) restoreTimes(
+	ctx context.Context, container string, g *manifest.Game, host string, rendered []entry,
+) error {
+	plan, err := Assemble(g, host)
+	if err != nil {
+		return err
+	}
+	aging := NewAging(g.ID, g.Version, g.Timeline.Start, g.Timeline.Span)
+	owner := Owner{User: "root"}
+
+	// Ordered, so a parent is stamped after the child whose write disturbed it.
+	var targets []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			targets = append(targets, p)
+		}
+	}
+
+	var disturbed []string
+	for _, e := range rendered {
+		disturbed = append(disturbed, e.Path)
+	}
+	disturbed = append(disturbed, accountDatabases...)
+	disturbed = append(disturbed, runtimeFiles...)
+
+	for _, target := range disturbed {
+		add(target)
+		for dir := path.Dir(target); dir != "/" && dir != "."; dir = path.Dir(dir) {
+			add(dir)
+		}
+	}
+
+	// Deepest first: touching a directory does not disturb its parent, but
+	// stamping in this order keeps the intent obvious.
+	sort.Slice(targets, func(i, j int) bool {
+		return strings.Count(targets[i], "/") > strings.Count(targets[j], "/")
+	})
+
+	var script strings.Builder
+
+	// Sweep the directories the build could not date.
+	//
+	// Docker's layer diff drops a directory whose only change is its mtime, so
+	// the build-time sweep silently loses every empty directory it stamps --
+	// /opt, /mnt, /etc/apt/keyrings and a couple of hundred others keep the
+	// base image's build date. The game's own directories survive because
+	// their contents changed in the same layer; these have nothing in them to
+	// change. A live container has no layer diff, so doing it here works.
+	fmt.Fprintf(&script, `planned=$(mktemp)
+newer=$(mktemp)
+sort -u > "$planned"
+find / -xdev -type d -newermt @%d 	-not -path '/proc/*' -not -path '/sys/*' -not -path '/dev/*' 2>/dev/null 	| sort -u > "$newer"
+comm -23 "$newer" "$planned" | xargs -d '
+' -r touch -d @%d -- 2>/dev/null
+rm -f "$planned" "$newer"
+`, aging.Provisioned().Unix(), aging.Provisioned().Unix())
+
+	// Then the individual dates, which must win over the sweep.
+	for _, target := range targets {
+		at, ok := plan.ModTime(target)
+		if !ok {
+			// Not something the game placed -- a system directory, or a file
+			// the build created. It still needs a plausible date.
+			at = aging.FileTime(owner, target)
+		}
+		fmt.Fprintf(&script, "[ -e %q ] && touch -h -d @%d -- %q\n", target, at.Unix(), target)
+	}
+	script.WriteString("exit 0\n")
+
+	// The sweep's exclusion list is every path the plan names, so a game's own
+	// directories keep the dates the build gave them.
+	var planned strings.Builder
+	for _, line := range strings.Split(string(plan.rootfs.metaPlan()), "\n") {
+		if fields := strings.Split(line, "\t"); len(fields) == 3 {
+			planned.WriteString(fields[2])
+			planned.WriteString("\n")
+		}
+	}
+
+	res, err := s.api.Exec(ctx, container, docker.ExecOptions{
+		Cmd:   []string{"sh", "-c", script.String()},
+		User:  "root",
+		Stdin: strings.NewReader(planned.String()),
+	})
+	if err != nil {
+		return fmt.Errorf("restore timestamps: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("restoring timestamps exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// adoptExistingMetadata replaces each rendered file's mode and ownership with
+// whatever the built image already gives that path.
+//
+// The build placed an unrendered copy of every template, so the path exists and
+// carries the permissions the image intends. Anything the seeder cannot stat is
+// left with the values from the plan, which is the right fallback for a file the
+// build did not manage to place.
+func (s *Seeder) adoptExistingMetadata(ctx context.Context, container string, entries []entry) error {
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		paths = append(paths, e.Path)
+	}
+
+	res, err := s.api.Exec(ctx, container, docker.ExecOptions{
+		Cmd: []string{"sh", "-c",
+			`while IFS= read -r p; do stat -c '%a %u %g %n' -- "$p" 2>/dev/null || true; done`},
+		User:  "root",
+		Stdin: strings.NewReader(strings.Join(paths, "\n") + "\n"),
+	})
+	if err != nil {
+		return fmt.Errorf("read existing file metadata: %w", err)
+	}
+
+	type meta struct {
+		mode     fs.FileMode
+		uid, gid int
+	}
+	existing := map[string]meta{}
+
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		fields := strings.SplitN(strings.TrimRight(line, "\r"), " ", 4)
+		if len(fields) != 4 {
+			continue
+		}
+		mode, err := strconv.ParseUint(fields[0], 8, 32)
+		if err != nil {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		gid, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		existing[fields[3]] = meta{mode: fs.FileMode(mode), uid: uid, gid: gid}
+	}
+
+	for i := range entries {
+		if m, ok := existing[entries[i].Path]; ok {
+			entries[i].Mode = m.mode
+			entries[i].UID, entries[i].GID = m.uid, m.gid
+		}
 	}
 	return nil
 }
@@ -393,6 +533,14 @@ func tarEntries(entries []entry) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// runtimeFiles are written by the container runtime when the container starts,
+// so the image cannot carry a date for them. Left alone they are the only
+// things on the box stamped with the real present, which makes them the one
+// place a player can read the engine's clock rather than the game's.
+var runtimeFiles = []string{
+	"/etc/hostname", "/etc/hosts", "/etc/resolv.conf", "/etc/mtab",
 }
 
 // SeedTimeout bounds seeding. A container that cannot be seeded must not be

@@ -93,7 +93,7 @@ requires: [backup-op, ops-oncall]   # key from one, passphrase from the other
 actually sits, and the validator reads it as that level's user to prove the
 level is solvable.
 
-### The validator
+### The static validator
 
 Permission mistakes are the main way an authored game silently breaks, and they
 are mechanically checkable. `wge validate` rejects, among others:
@@ -106,9 +106,32 @@ are mechanically checkable. `wge validate` rejects, among others:
 - two levels sharing a Unix account
 - a service running as root, or sharing a level's account
 
-Every fault is reported in one pass. The checks that need a running container —
-*can this user actually read that file, does anything leak upward* — belong to
-the build-time test pass, which is not built yet.
+Every fault is reported in one pass.
+
+### The permission test pass
+
+`wge test` answers the question the manifest cannot: whether the filesystem the
+build actually produced enforces the graph the manifest describes. It boots the
+image, seeds it with a throwaway run, and then — as each level's own uid —
+attempts the reads. Nothing here reasons about modes and groups; a permission
+model derived from the manifest would only ever agree with itself.
+
+- **Solvability.** Every credential a level grants must be readable by that
+  level, or everything after it is unreachable.
+- **Ownership.** Nothing belonging to a level a player has not reached may be
+  readable from where they stand.
+- **Credential sweep.** Every file the level can read is searched for the
+  credentials it should not hold. This is the check that matters most: it
+  assumes nothing about where a credential stays, and catches a password copied
+  into a log, left in a backup, or sitting in a config nothing in the manifest
+  mentions.
+- **Setuid audit.** `find / -perm -4000` is the first thing a competent player
+  runs, and it should return exactly what the author intended. The expected set
+  is the base image's own, diffed at test time, so the check cannot go stale.
+
+The verifier's own tests build deliberately broken games and assert each check
+fires. A permission check that cannot detect a leak is worse than none: it says
+the game is safe to serve.
 
 ## The image pipeline
 
@@ -142,8 +165,25 @@ that away in about four seconds. This is where realism is actually won:
 The plan is applied in two phases around the level setup scripts, because
 `COPY` discards tar ownership and every later step re-stamps mtimes: ownership
 before `setup.sh` so it can build on it, timestamps last so nothing undoes them.
-Permissions belong to `setup.sh` alone -- that is where a game's access control
-is expressed.
+Permissions belong to `setup.sh` alone — that is where a game's access control
+is expressed, so seeding reads the mode a file already has rather than imposing
+the author's on-disk one.
+
+Two details are worth knowing before touching this code:
+
+- **The package manager's logs are the loudest tell on the box.**
+  `/var/log/apt/history.log` keeps the literal `apt-get install` command line —
+  which reads like a game engine's recipe — and `dpkg.log` dates every install
+  to the minute the image was built. Both are purged.
+- **Docker's layer diff drops a directory whose only change is its mtime.** A
+  build-time sweep silently loses every empty directory it stamps, so the game's
+  own directories survive (their contents changed in the same layer) while
+  `/opt`, `/mnt` and a couple of hundred others keep the base image's build
+  date. Directories are therefore swept again at container start, where there is
+  no layer diff to lose them.
+
+The result is a box with no clock leak: nothing on it is dated after the
+fictional present, including the files the container runtime writes at startup.
 
 ## Commands
 
@@ -153,6 +193,7 @@ wge graph    <game-dir>    print the level graph and the credentials along it
 wge creds    <game-dir>    re-derive a run's credentials (support tool)
 wge base     <base-dir>    build a base image games are built on
 wge build    <game-dir>    compile a game into a container image
+wge test     <game-dir>    verify a built image enforces its level graph
 wge serve                  run the SSH front door
 ```
 
@@ -161,6 +202,7 @@ To play the example game:
 ```
 wge base bases/debian-13
 wge build games/heist
+wge test games/heist
 wge serve
 
 ssh enroll@localhost -p 2222      # register, and collect the first password
@@ -198,7 +240,7 @@ Built and tested:
 | `internal/broker` | SSH front door and the auth chain |
 | `internal/runtime` | container lifecycle over the Docker Engine API |
 | `internal/library` | game loading and image naming |
-| `internal/build` | the image pipeline, the aging pass, and per-run seeding |
+| `internal/build` | the image pipeline, the aging pass, seeding, and verification |
 | `internal/docker` | a small Engine API client |
 
 The example game is playable end to end: four levels, a DAG whose final level
@@ -207,20 +249,14 @@ backup on one level, its passphrase found on another.
 
 Next, roughly in order:
 
-1. **The in-container test pass.** Boot the image and, as each level's uid,
-   prove the grant is readable and that nothing belonging to a later level is.
-   This is not hypothetical: building the pipeline produced exactly that bug —
-   the metadata plan ran after `setup.sh` and reverted a `chmod`, leaving level
-   two's credential world-readable. A permission check would have caught it
-   before the image was ever served.
-2. **Credentials inside archives.** `placed_in` accepts an archive member, but
+1. **Credentials inside archives.** `placed_in` accepts an archive member, but
    rendering into one means repacking it during seeding. Until it does, the
    validator rejects the syntax rather than producing a game whose credential
    never appears.
-3. **Session recording and the hint engine.** The broker proxies every byte, so
+2. **Session recording and the hint engine.** The broker proxies every byte, so
    it already knows whether a player is circling or stalled — no in-container
    agent to find or tamper with. Hints arrive as mail from an in-fiction
    correspondent, escalating in tiers, and unprompted when a player stalls.
-4. **Services and cron.** Declared in the manifest and validated, but not yet
+3. **Services and cron.** Declared in the manifest and validated, but not yet
    installed or started by the build; PID 1 is `sleep infinity`.
-5. **The reaper**, scratch-volume persistence, and multi-host runs.
+4. **The reaper**, scratch-volume persistence, and multi-host runs.

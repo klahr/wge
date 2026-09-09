@@ -31,6 +31,7 @@ commands:
   creds    <game-dir>    derive the credentials for one run (support tool)
   base     <base-dir>    build a base image games are built on
   build    <game-dir>    compile a game into a container image
+  test     <game-dir>    verify a built image enforces its level graph
   serve                  run the SSH front door
 `
 
@@ -52,6 +53,8 @@ func run(args []string) error {
 		return cmdBase(rest)
 	case "build":
 		return cmdBuild(rest)
+	case "test":
+		return cmdTest(rest)
 	case "serve":
 		return cmdServe(rest)
 	case "help", "-h", "--help":

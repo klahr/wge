@@ -350,6 +350,44 @@ var accountDatabases = []string{
 	"/etc/subuid", "/etc/subgid",
 }
 
+// ModTime returns the timestamp the plan assigns to a path.
+func (p *Plan) ModTime(target string) (time.Time, bool) {
+	for _, e := range p.rootfs.all() {
+		if e.Path == target {
+			return e.ModTime, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// PathsByLevel returns the paths each level's account owns, which is what the
+// permission verification compares against: a level must not be able to read
+// what belongs to a level it has not earned its way to.
+func (p *Plan) PathsByLevel() map[string][]string {
+	levelByUID := map[int]string{}
+	for _, a := range p.Accounts {
+		if a.Level != nil {
+			levelByUID[a.UID] = a.Level.ID
+		}
+	}
+
+	owned := map[string][]string{}
+	for _, e := range p.rootfs.all() {
+		// MetaOnly entries are files the build created rather than files the
+		// game placed; they belong to the system, not to a level.
+		if e.MetaOnly || e.UID < 0 {
+			continue
+		}
+		if level, ok := levelByUID[e.UID]; ok {
+			owned[level] = append(owned[level], e.Path)
+		}
+	}
+	for level := range owned {
+		sort.Strings(owned[level])
+	}
+	return owned
+}
+
 // Bounds returns the oldest and newest mtime in the plan, which is what makes
 // the aging visible in a build's output.
 func (p *Plan) Bounds() (oldest, newest time.Time) {
@@ -424,9 +462,15 @@ func (p *Plan) dockerfile() string {
 	b.WriteString("ENV DEBIAN_FRONTEND=noninteractive\n")
 
 	if pkgs := p.packages(); len(pkgs) > 0 {
+		// The package manager's own logs are the loudest tell on the box.
+		// history.log keeps the literal apt-get command line -- which reads
+		// like a game engine's recipe -- and dpkg.log dates every install to
+		// the minute the image was built.
 		fmt.Fprintf(&b, "RUN apt-get update \\\n"+
 			" && apt-get install -y --no-install-recommends %s \\\n"+
-			" && rm -rf /var/lib/apt/lists/*\n", strings.Join(pkgs, " "))
+			" && rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log \\\n"+
+			"      /var/log/alternatives.log /var/cache/debconf/*.dat-old\n",
+			strings.Join(pkgs, " "))
 	}
 
 	b.WriteString("COPY provision.sh /wge/provision.sh\n")
@@ -447,7 +491,13 @@ func (p *Plan) dockerfile() string {
 
 	// Timestamps last, and only timestamps: everything above this line has
 	// re-stamped whatever it touched with the build time.
-	b.WriteString("RUN sh /wge/apply-meta.sh /wge/meta.txt time && rm -rf /wge\n")
+	//
+	// The sweep comes first and covers everything the game did not place --
+	// the base image's own files, and whatever the package installs dropped --
+	// then the plan gives the game's own files their individual dates.
+	fmt.Fprintf(&b, "RUN sh /wge/apply-meta.sh /wge/meta.txt sweep %d \\\n"+
+		" && sh /wge/apply-meta.sh /wge/meta.txt time \\\n"+
+		" && rm -rf /wge\n", p.Aging.Provisioned().Unix())
 
 	// PID 1 only has to keep the container alive; players arrive by exec.
 	b.WriteString(`CMD ["/bin/sleep", "infinity"]` + "\n")
@@ -558,8 +608,14 @@ const applyMetaScript = `#!/bin/sh
 #
 #   own   -- restore ownership, which COPY discarded. Runs before the level
 #            setup scripts so they can override it and build on it.
-#   time  -- restore mtimes. Runs last, after everything that would re-stamp
-#            them with the build time.
+#   sweep -- date everything the game did not place to the provisioning time,
+#            leaving alone anything already older (package files carry genuine
+#            upstream dates, and those are more plausible than any invention).
+#            This catches files. Docker's layer diff drops a directory whose
+#            only change is its mtime, so empty directories are swept again at
+#            container start, where there is no layer diff to lose them.
+#   time  -- restore mtimes for the paths the plan names. Runs last, after
+#            everything that would re-stamp them with the build time.
 #
 # Permissions are not in the plan: the tar already carries the author's mode,
 # and setup.sh owns any change to it.
@@ -567,6 +623,22 @@ set -u
 
 plan="$1"
 phase="$2"
+
+if [ "$phase" = "sweep" ]; then
+	provisioned="$3"
+
+	cut -f3 "$plan" | sort -u > /wge/planned
+	find / -xdev -newermt "@$provisioned" \
+		-not -path '/proc/*' -not -path '/sys/*' -not -path '/dev/*' \
+		-not -path '/wge*' 2>/dev/null | sort -u > /wge/newer
+
+	# Everything newer than the provisioning date that the plan does not name.
+	comm -23 /wge/newer /wge/planned > /wge/stamp
+	xargs -a /wge/stamp -d '\n' -r touch -h -d "@$provisioned" -- 2>/dev/null
+
+	rm -f /wge/planned /wge/newer /wge/stamp
+	exit 0
+fi
 
 while IFS='	' read -r owner ts target; do
 	[ -n "$ts" ] || continue

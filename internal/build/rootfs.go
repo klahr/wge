@@ -93,6 +93,15 @@ func (r *rootfs) dirs() []entry {
 // directory always precedes what it contains.
 func (r *rootfs) all() []entry {
 	all := append(append([]entry{}, r.dirs()...), r.entries...)
+
+	// Ancestors of an authored path, and the system directories an authored
+	// path happens to sit in, keep whatever owns them in the base image.
+	for i := range all {
+		if isSystemPath(all[i].Path) {
+			all[i].UID, all[i].GID = -1, -1
+		}
+	}
+
 	sort.Slice(all, func(i, j int) bool {
 		if depth(all[i].Path) != depth(all[j].Path) {
 			return depth(all[i].Path) < depth(all[j].Path)
@@ -103,6 +112,42 @@ func (r *rootfs) all() []entry {
 }
 
 func depth(p string) int { return strings.Count(path.Clean(p), "/") }
+
+// systemTrees are never handed to a level, nor anything beneath them.
+var systemTrees = []string{
+	"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
+	"/boot", "/proc", "/sys", "/dev", "/run",
+}
+
+// systemDirs are never handed to a level, though a level may own something
+// placed inside them.
+var systemDirs = map[string]bool{
+	"/": true, "/etc": true, "/home": true, "/media": true, "/mnt": true,
+	"/opt": true, "/root": true, "/srv": true, "/tmp": true, "/var": true,
+	"/var/log": true, "/var/lib": true, "/var/cache": true, "/var/spool": true,
+	"/var/tmp": true, "/var/mail": true, "/var/opt": true, "/var/local": true,
+}
+
+// isSystemPath reports whether a path belongs to the operating system rather
+// than to any level.
+//
+// It exists because placing a file under files/var/backups/ means the author
+// wants that file, and plausibly that directory -- but not /var. Without this,
+// every ancestor of an authored path is chowned to the level, and the box ends
+// up with a mail operator owning /var, which is both absurd on its face and a
+// permission model nobody intended.
+func isSystemPath(p string) bool {
+	p = path.Clean(p)
+	if systemDirs[p] {
+		return true
+	}
+	for _, tree := range systemTrees {
+		if p == tree || strings.HasPrefix(p, tree+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // writeTar writes the rootfs into a tar under the given prefix.
 //
