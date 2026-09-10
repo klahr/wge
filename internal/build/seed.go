@@ -444,9 +444,51 @@ func renderTree(l *manifest.Level, acct *account, tree, base string, aging *Agin
 	var out []entry
 
 	err := filepath.WalkDir(root, func(src string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
 		}
+
+		rel, relErr := filepath.Rel(root, src)
+		if relErr != nil {
+			return relErr
+		}
+
+		if d.IsDir() {
+			if !isArchiveDir(d.Name()) {
+				return nil
+			}
+
+			// An archive cannot have one member replaced in place, so seeding
+			// builds the whole file again with its credentials rendered.
+			dst := path.Join(base, filepath.ToSlash(rel))
+			templated, err := archiveContainsTemplate(src)
+			if err != nil || !templated {
+				return err
+			}
+
+			content, err := packArchive(src, dst, aging, owner, acct.UID, acct.GID,
+				func(member string, raw []byte) ([]byte, error) {
+					if !bytes.Contains(raw, []byte(templateMarker)) {
+						return raw, nil
+					}
+					return render(member, string(raw), secrets)
+				})
+			if err != nil {
+				return err
+			}
+
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			out = append(out, entry{
+				Path: dst, Content: content, Mode: info.Mode().Perm(),
+				UID: acct.UID, GID: acct.GID,
+				ModTime: aging.FileTime(owner, dst),
+			})
+			return fs.SkipDir
+		}
+
 		raw, err := os.ReadFile(src)
 		if err != nil {
 			return err
@@ -455,10 +497,6 @@ func renderTree(l *manifest.Level, acct *account, tree, base string, aging *Agin
 			return nil
 		}
 
-		rel, err := filepath.Rel(root, src)
-		if err != nil {
-			return err
-		}
 		dst := path.Join(base, filepath.ToSlash(rel))
 
 		content, err := render(dst, string(raw), secrets)

@@ -7,8 +7,8 @@ sundqvist's key     -- passphrase is
     {{ .Passphrase "sysadmin" }}
 
   he gave it to me when he was on holiday and never changed it. the key
-  itself is not on this box, it went out with a backup restore at some
-  point. do not put them in the same place.
+  itself is not on this box, it went out in one of the nightly tarballs
+  at some point. do not put them in the same place.
 
   (it is for the vault, not for here. the vault is not on the internet --
   you have to go through the relay.)

@@ -193,6 +193,17 @@ func (p *Plan) copyTree(acct *account, tree, base string) error {
 		}
 
 		if d.IsDir() {
+			// A directory named like an archive becomes one, packed from what
+			// is inside it, and its contents are not laid down loose.
+			if isArchiveDir(d.Name()) {
+				content, err := packArchive(src, dst, p.Aging, owner, acct.UID, acct.GID, nil)
+				if err != nil {
+					return err
+				}
+				p.rootfs.addFile(dst, content, info.Mode().Perm(), acct, p.Aging.FileTime(owner, dst))
+				return fs.SkipDir
+			}
+
 			p.rootfs.add(entry{
 				Path: dst, Dir: true, Mode: 0o755,
 				UID: acct.UID, GID: acct.GID,

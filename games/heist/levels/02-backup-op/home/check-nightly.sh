@@ -3,10 +3,10 @@
 # something before the retention job eats the previous one.
 set -eu
 
-latest=$(ls -1dt /var/backups/restore-* 2>/dev/null | head -1)
+latest=$(ls -1t /var/backups/nightly*.tar.gz 2>/dev/null | head -1)
 if [ -z "$latest" ]; then
-	echo "no restore staging found" >&2
+	echo "no nightly tarball found" >&2
 	exit 1
 fi
 
-find "$latest" -type f | wc -l
+tar tzf "$latest" | wc -l

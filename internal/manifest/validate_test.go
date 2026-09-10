@@ -186,13 +186,25 @@ func TestGrantMustSayWhereTheCredentialIs(t *testing.T) {
 	mustFail(t, g, "relative path")
 }
 
-// Rendering a per-run credential inside an archive would mean repacking it
-// during seeding. Until the pipeline can, saying so beats producing a game
-// whose credential never appears.
-func TestArchiveMemberGrantIsRejected(t *testing.T) {
+// A credential inside an archive is allowed: the build packs the archive and
+// seeding produces the whole file again with the credential rendered.
+func TestArchiveMemberGrantIsAccepted(t *testing.T) {
 	g := valid()
 	g.Levels[1].Grants[1].PlacedIn = "/var/backups/nightly.tar.gz:home/d/.ssh/id_ed25519"
-	mustFail(t, g, "credentials inside archives are not supported yet")
+	if err := g.Validate(); err != nil {
+		t.Fatalf("an archive member should validate: %v", err)
+	}
+}
+
+// Only an archive can have members, and a member is a path inside it.
+func TestArchiveMemberGrantIsChecked(t *testing.T) {
+	g := valid()
+	g.Levels[1].Grants[1].PlacedIn = "/var/backups/restore:home/d/.ssh/id_ed25519"
+	mustFail(t, g, "which is not an archive")
+
+	g = valid()
+	g.Levels[1].Grants[1].PlacedIn = "/var/backups/nightly.tar.gz:/home/d/key"
+	mustFail(t, g, "a member path is relative to the archive")
 }
 
 func TestServiceMayNotRunAsRoot(t *testing.T) {

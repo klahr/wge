@@ -2,7 +2,9 @@ package manifest
 
 import (
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -170,16 +172,62 @@ func (l *Level) validateGrants() Errors {
 		if !path.IsAbs(gr.Path()) {
 			errs = append(errs, fmt.Errorf("level %s: grant to %q has a relative path %q", l.ID, gr.To, gr.Path()))
 		}
-		// Rendering a per-run credential into a member of an archive means
-		// repacking the archive during seeding, which the pipeline does not do
-		// yet. Accepting it here would produce a game whose credential never
-		// appears.
-		if gr.Member() != "" {
-			errs = append(errs, fmt.Errorf(
-				"level %s: grant to %q is placed inside the archive %q; credentials inside archives are not supported yet, place it in a plain file",
-				l.ID, gr.To, gr.Path()))
+		if member := gr.Member(); member != "" {
+			errs = append(errs, l.validateArchiveGrant(gr, member)...)
 		}
 	}
+	return errs
+}
+
+// ArchiveSuffix marks a directory in a level's tree that is packed into an
+// archive of the same name.
+const ArchiveSuffix = ".tar.gz"
+
+// validateArchiveGrant checks a credential placed inside an archive.
+//
+// The archive is a directory in the level's own tree that the build packs, so
+// it can be checked here: a grant naming an archive the game does not build is
+// a credential that will never appear, and the manifest is where that should
+// be caught rather than at the moment a player looks for it.
+func (l *Level) validateArchiveGrant(gr Grant, member string) Errors {
+	var errs Errors
+
+	if !strings.HasSuffix(gr.Path(), ArchiveSuffix) {
+		errs = append(errs, fmt.Errorf(
+			"level %s: grant to %q names a member of %q, which is not an archive; archives end in %s",
+			l.ID, gr.To, gr.Path(), ArchiveSuffix))
+		return errs
+	}
+	if strings.HasPrefix(member, "/") {
+		errs = append(errs, fmt.Errorf(
+			"level %s: grant to %q names %q inside an archive; a member path is relative to the archive",
+			l.ID, gr.To, member))
+	}
+
+	// Checked against the level's own directory when there is one; a game
+	// assembled in memory, as the tests do, has nothing to look at.
+	if l.Dir == "" {
+		return errs
+	}
+
+	candidates := []string{
+		filepath.Join(l.Dir, FilesDir, filepath.FromSlash(strings.TrimPrefix(gr.Path(), "/"))),
+		filepath.Join(l.Dir, HomeDir, filepath.FromSlash(path.Base(gr.Path()))),
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			if _, err := os.Stat(filepath.Join(candidate, filepath.FromSlash(member))); err != nil {
+				errs = append(errs, fmt.Errorf(
+					"level %s: grant to %q names %q inside %s, which the archive does not contain",
+					l.ID, gr.To, member, gr.Path()))
+			}
+			return errs
+		}
+	}
+
+	errs = append(errs, fmt.Errorf(
+		"level %s: grant to %q is inside %s, but no directory of that name is in the level's %s tree, so no archive is built",
+		l.ID, gr.To, gr.Path(), FilesDir))
 	return errs
 }
 

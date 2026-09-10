@@ -119,10 +119,15 @@ grants: []
 // verifyFixture builds a fixture and returns the findings.
 func verifyFixture(t *testing.T, id string, setup map[string]string) []Finding {
 	t.Helper()
+	return verifyDir(t, id, writeGame(t, id, setup))
+}
+
+// verifyDir builds and verifies a game that is already laid out.
+func verifyDir(t *testing.T, id, dir string) []Finding {
+	t.Helper()
 	api := requireDocker(t)
 	ctx := context.Background()
 
-	dir := writeGame(t, id, setup)
 	g, err := manifest.Load(dir)
 	if err != nil {
 		t.Fatalf("load fixture: %v", err)
@@ -232,5 +237,78 @@ func TestVerifyCatchesAnUnexpectedSetuidBinary(t *testing.T) {
 	}
 	if setuid[0].Path != "/usr/local/bin/backup-helper" {
 		t.Errorf("unexpected finding: %v", setuid[0])
+	}
+}
+
+// writeArchiveGame puts the second credential inside an archive, and leaves the
+// archive readable by everybody.
+//
+// The credential sweep cannot catch this: it greps files, and a gzip is not
+// text. Only the manifest knows what is inside, which is what the archive
+// check uses.
+func writeArchiveGame(t *testing.T, id string, mode string) string {
+	t.Helper()
+	dir := writeGame(t, id, map[string]string{
+		"01-alpha": "chmod 0600 /home/alpha/handover.txt",
+		// /srv is a system directory, so listing it is nobody's leak: what is
+		// under test is the archive file's own mode.
+		"02-bravo": "chmod " + mode + " /srv/nightly.tar.gz",
+	})
+
+	write := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// bravo's credential for charlie moves inside a tarball.
+	write("levels/02-bravo/level.yaml", `id: bravo
+user: bravo
+name: Bravo Account
+requires: [alpha]
+grants:
+  - kind: password
+    to: charlie
+    placed_in: /srv/nightly.tar.gz:secrets/handover.txt
+`)
+	if err := os.Remove(filepath.Join(dir, "levels/02-bravo/home/notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	write("levels/02-bravo/files/srv/nightly.tar.gz/secrets/handover.txt",
+		`final account: {{ .Password "charlie" }}`)
+	return dir
+}
+
+// An archive only its owner can open is fine.
+func TestArchiveCredentialIsAcceptedWhenTheArchiveIsClosed(t *testing.T) {
+	findings := verifyDir(t, "arcclosed", writeArchiveGame(t, "arcclosed", "0600"))
+	if len(findings) != 0 {
+		t.Fatalf("a closed archive reported %d problems:\n%v", len(findings), findings)
+	}
+}
+
+// A world-readable one hands its contents to whoever can open it, whatever the
+// permissions on the file the credential would otherwise have been in.
+func TestArchiveCredentialLeaksWhenTheArchiveIsOpen(t *testing.T) {
+	findings := verifyDir(t, "arcopen", writeArchiveGame(t, "arcopen", "0644"))
+
+	leaks := findingsOfKind(findings, FindingCredentialLeak)
+	if len(leaks) == 0 {
+		t.Fatalf("a readable archive holding a credential was not detected; findings: %v", findings)
+	}
+
+	var found bool
+	for _, f := range leaks {
+		if f.Level == "alpha" && f.Path == "/srv/nightly.tar.gz" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected alpha to be caught opening the archive, got %v", leaks)
 	}
 }

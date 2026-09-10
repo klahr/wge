@@ -67,6 +67,7 @@ games/heist/
       level.yaml         # user, prerequisites, the credential it grants
       home/              # file tree copied into the level user's home
       files/             # artifacts elsewhere: files/var/backups/... -> /var/backups/...
+      files/var/backups/nightly.tar.gz/   # a directory ending .tar.gz becomes one
       mail/              # messages delivered to the level user's mailbox
       setup.sh           # permissions, services, cron
 ```
@@ -140,6 +141,29 @@ id: sysadmin
 user: dsundqvist
 requires: [backup-op, ops-oncall]   # key from one, passphrase from the other
 ```
+
+A directory whose name ends in `.tar.gz` is packed into an archive of that
+name, and a credential can live inside one:
+
+```yaml
+grants:
+  - kind: ssh-key
+    to: sysadmin
+    placed_in: /var/backups/nightly.tar.gz:home/dsundqvist/.ssh/id_ed25519
+```
+
+A tarball of somebody's home directory is much better fiction than the
+extracted copy standing in for one, and it is the shape a real staged backup
+has. Seeding cannot edit a member in place, so it builds the whole archive
+again with the credential rendered — which is also why the members are aged
+individually: a tarball whose contents all share the build's timestamp is a
+tell the moment somebody extracts it, and extracting it is the point.
+
+The verifier has a check of its own for these, because the credential sweep
+cannot see inside a gzip. The manifest already says which credential is in
+which archive, so the only question left is who can open it — and a level that
+can open the archive holds everything in it, whatever the permissions on the
+file the credential would otherwise have been in.
 
 `grants.placed_in` is not documentation. It names where the credential
 actually sits, and the validator reads it as that level's user to prove the
@@ -671,21 +695,7 @@ store the front door will not attach anybody to.
 
 Next, roughly in order:
 
-1. **Credentials inside archives.** `placed_in` accepts an archive member, but
-   rendering into one means repacking it during seeding. Until it does, the
-   validator rejects the syntax rather than producing a game whose credential
-   never appears — a tarball of somebody's home directory is better fiction
-   than the extracted copy standing in for it.
-2. **A quota on the scratch volumes.** Admission control caps how many machines
-   a node runs, but nothing caps what a player writes. A disk quota on the
-   backing filesystem is the only control there is today, and the same is true
-   of each container's writable layer.
-3. **gVisor or Kata.** The design called for a sandboxed runtime and it was
-   never done. It costs syscall performance nobody will notice on a box where
-   people run `grep`, and it turns container escape from one kernel bug away
-   into a genuinely hard problem — which matters on a machine whose whole
-   purpose is to invite strangers to attack it.
-4. **More than one node.** A run is a pure function of its salt and
+1. **More than one node.** A run is a pure function of its salt and
    `runs.current_host` already pins it to a machine, so the scheduling is
    mostly there; what is missing is anything that routes a player to a second
    node, and the scratch volume is the one thing that does not travel.

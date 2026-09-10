@@ -123,6 +123,13 @@ func (v *Verifier) Verify(ctx context.Context, g *manifest.Game, host, image str
 		report.Checks += checks
 	}
 
+	archives, checks, err := v.verifyArchives(ctx, container, g, levels)
+	if err != nil {
+		return nil, err
+	}
+	report.Findings = append(report.Findings, archives...)
+	report.Checks += checks
+
 	setuid, err := v.verifySetuid(ctx, container, plan.base(), host)
 	if err != nil {
 		return nil, err
@@ -405,6 +412,71 @@ exit 0`
 
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Path < findings[j].Path })
 	return findings, nil
+}
+
+// verifyArchives checks who can reach a credential packed inside an archive.
+//
+// The credential sweep cannot see into one: it greps files, and a gzip is not
+// text. So this check does not look at the contents at all -- the manifest
+// already says which credential is inside which archive, and the only question
+// left is who can open the archive. A level that can read it holds everything
+// in it, whatever the file it is nested in claims about its own permissions.
+func (v *Verifier) verifyArchives(
+	ctx context.Context, container string, g *manifest.Game, levels []*manifest.Level,
+) ([]Finding, int, error) {
+	type packed struct {
+		archive string
+		target  string
+		owner   string
+	}
+
+	var contents []packed
+	for _, l := range levels {
+		for _, gr := range l.Grants {
+			if gr.Member() != "" {
+				contents = append(contents, packed{archive: gr.Path(), target: gr.To, owner: l.ID})
+			}
+		}
+	}
+	if len(contents) == 0 {
+		return nil, 0, nil
+	}
+
+	var findings []Finding
+	var checks int
+
+	for _, l := range levels {
+		known := mayKnow(g, l)
+
+		var archives []string
+		for _, c := range contents {
+			if !known[c.target] {
+				archives = append(archives, c.archive)
+			}
+		}
+		if len(archives) == 0 {
+			continue
+		}
+
+		probes, err := v.probe(ctx, container, l.User, archives)
+		if err != nil {
+			return nil, 0, err
+		}
+		checks += len(archives)
+
+		for _, c := range contents {
+			if known[c.target] || !probes[c.archive] {
+				continue
+			}
+			findings = append(findings, Finding{
+				Kind: FindingCredentialLeak, Level: l.ID, Path: c.archive,
+				Detail: fmt.Sprintf(
+					"%s can open this archive, and %s's credential for %s is inside it",
+					l.User, c.owner, c.target),
+			})
+		}
+	}
+	return findings, checks, nil
 }
 
 // verifySetuid reports setuid binaries the base image did not have.
