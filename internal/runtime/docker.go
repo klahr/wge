@@ -129,9 +129,10 @@ type Docker struct {
 	limits Limits
 
 	// node identifies this machine in the runs table.
-	node   string
-	reaper *reaper
-	sweep  time.Duration
+	node    string
+	reaper  *reaper
+	sweep   time.Duration
+	scratch bool
 
 	// authOffsets records how far each machine's auth log had got when it
 	// finished booting, so that live sessions can be told from the history the
@@ -151,8 +152,12 @@ type Options struct {
 	// Runs is optional; without it sticky routing is not recorded.
 	Runs Runs
 	// Node names this machine. Defaults to the system hostname.
-	Node   string
-	Limits Limits
+	Node string
+	// NoScratch turns off the persistent scratch volume. Without it a reap
+	// takes the player's own files with it; with it, disk is consumed per run
+	// and is not quota'd.
+	NoScratch bool
+	Limits    Limits
 	// Grace is how long a container outlives its last session.
 	Grace time.Duration
 	// Sweep is how often orphaned containers are collected.
@@ -193,14 +198,15 @@ func NewDocker(opts Options) (*Docker, error) {
 	}
 
 	d := &Docker{
-		api:    docker.New(opts.Socket),
-		log:    opts.Logger,
-		images: opts.Images,
-		seeder: opts.Seeder,
-		runs:   opts.Runs,
-		limits: opts.Limits,
-		node:   opts.Node,
-		sweep:  opts.Sweep,
+		api:     docker.New(opts.Socket),
+		log:     opts.Logger,
+		images:  opts.Images,
+		seeder:  opts.Seeder,
+		runs:    opts.Runs,
+		limits:  opts.Limits,
+		node:    opts.Node,
+		sweep:   opts.Sweep,
+		scratch: !opts.NoScratch,
 	}
 	d.reaper = newReaper(opts.Grace, d.destroy)
 	return d, nil
@@ -212,6 +218,16 @@ func networkMode(networks []string) string {
 		return "none"
 	}
 	return networks[0]
+}
+
+// ScratchVolume is a run's persistent scratch space.
+//
+// It is deliberately not reaped with the run's containers. Everything else
+// about a box is a pure function of the salt and costs nothing to rebuild; the
+// notes a player wrote are the one thing that is not, and losing them to an
+// idle timeout is the only part of a reap that actually stings.
+func ScratchVolume(runID int64) string {
+	return fmt.Sprintf("wge-run-%d-scratch", runID)
 }
 
 // ContainerName is the container backing one host of one run. Deriving it from
@@ -266,6 +282,14 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 // ensureTopology brings up the run's networks and every machine on them.
 func (d *Docker) ensureTopology(ctx context.Context, s *broker.Session, plan topology) error {
 	labels := map[string]string{"wge.run": fmt.Sprint(s.Run.ID), "wge.game": s.Game.ID}
+
+	if d.scratch {
+		// Created before anything mounts it, and never removed with the
+		// containers: it is the run's memory of what the player did.
+		if err := d.api.CreateVolume(ctx, ScratchVolume(s.Run.ID), labels); err != nil {
+			return fmt.Errorf("create scratch volume: %w", err)
+		}
+	}
 
 	for _, network := range plan.networks {
 		if err := d.api.CreateNetwork(ctx, network, labels); err != nil {
@@ -557,7 +581,7 @@ func (d *Docker) create(ctx context.Context, name, image, host string, networks 
 			"wge.game": s.Game.ID,
 			"wge.host": host,
 		},
-		"HostConfig": d.hostConfig(networks),
+		"HostConfig": d.hostConfig(networks, s.Run.ID),
 	}
 
 	if len(networks) > 0 {
@@ -574,7 +598,7 @@ func (d *Docker) create(ctx context.Context, name, image, host string, networks 
 
 // hostConfig is the sandbox. Every field here exists because the container is
 // hostile by design: the player is invited to attack it.
-func (d *Docker) hostConfig(networks []string) map[string]any {
+func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 	caps := d.limits.Capabilities
 	if caps == nil {
 		caps = multiUserCaps
@@ -616,7 +640,31 @@ func (d *Docker) hostConfig(networks []string) map[string]any {
 	if len(d.limits.StorageOpt) > 0 {
 		cfg["StorageOpt"] = d.limits.StorageOpt
 	}
+
+	// The same volume on every machine in the run, so a player's notes follow
+	// them when they pivot. There is no quota on it: a disk quota on the
+	// backing filesystem is the only control, the same as for the container's
+	// own writable layer.
+	if d.scratch {
+		cfg["Mounts"] = []map[string]any{{
+			"Type":   "volume",
+			"Source": ScratchVolume(runID),
+			"Target": build.ScratchPath,
+		}}
+	}
 	return cfg
+}
+
+// RemoveScratch deletes a run's scratch space and everything in it.
+//
+// Nothing calls it during play. It is what a reset is supposed to do: a run
+// that has been re-rolled is a different game, and keeping the notes from the
+// last one would be keeping the answers.
+func (d *Docker) RemoveScratch(ctx context.Context, runID int64) error {
+	if err := d.api.RemoveVolume(ctx, ScratchVolume(runID)); err != nil && !docker.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 type execConfig struct {

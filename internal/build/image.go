@@ -404,6 +404,20 @@ func (p *Plan) ModTime(target string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// ScratchPath is where a run's persistent scratch space is mounted.
+//
+// A shared scratch directory is a thing corporate machines actually have, which
+// is what makes it a plausible place for the one part of the filesystem that
+// survives a container being reaped. It is deliberately not inside anybody's
+// home directory: it follows the player across accounts and across machines,
+// and a home directory that did that would be a stranger thing to explain.
+const ScratchPath = "/srv/scratch"
+
+// ScratchGroup owns the scratch directory. Every account a player can log in
+// as is a member, which is what lets a note written under one level be edited
+// under the next.
+const ScratchGroup = "scratch"
+
 // hasServices reports whether any level on this host declares a service.
 func (p *Plan) hasServices() bool {
 	for _, l := range p.Game.Levels {
@@ -672,6 +686,33 @@ func (p *Plan) provisionScript() string {
 	// Mail spools must exist for the levels that have one, with the group a
 	// Debian system expects.
 	b.WriteString("\nmkdir -p /var/mail\nchmod 2775 /var/mail\n")
+
+	// The shared scratch mount, done the way a shared project directory is done
+	// on any Unix box: a group everybody who uses it belongs to, setgid so new
+	// files inherit that group, and a umask that leaves them group-writable.
+	//
+	// The obvious thing -- copying /tmp's 1777 -- fails twice over. The kernel's
+	// fs.protected_regular refuses to open a file owned by another user with
+	// O_CREAT inside a world-writable sticky directory, and `>>` passes O_CREAT,
+	// so appending to a note written under another account is denied outright.
+	// Dropping the sticky bit gets past that and straight into the ordinary
+	// permission: a file created with the default umask is 0664 owned by its
+	// author's private group, which no other account is in.
+	//
+	// Both of those exist to protect users from each other. Inside one run
+	// every account is the same person.
+	fmt.Fprintf(&b, "\ngroupadd -f %s\n", ScratchGroup)
+	for _, a := range p.Accounts {
+		if !a.Service {
+			fmt.Fprintf(&b, "usermod -a -G %s %s\n", ScratchGroup, a.User)
+		}
+	}
+	fmt.Fprintf(&b, "mkdir -p %s\nchgrp %s %s\nchmod 2775 %s\n",
+		ScratchPath, ScratchGroup, ScratchPath, ScratchPath)
+
+	// pam_umask reads this, so it applies to every login rather than only to
+	// shells that happen to source /etc/profile.
+	b.WriteString("sed -i 's/^UMASK.*/UMASK\t\t002/' /etc/login.defs\n")
 
 	return b.String()
 }

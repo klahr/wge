@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+
+	"github.com/klahr/wge/internal/build"
 )
 
 func frame(stream byte, payload string) []byte {
@@ -100,7 +102,7 @@ func TestDefaultCapabilitiesPermitPrivilegeDropping(t *testing.T) {
 
 func TestSandboxDefaults(t *testing.T) {
 	d := &Docker{limits: DefaultLimits()}
-	cfg := d.hostConfig(nil)
+	cfg := d.hostConfig(nil, 1)
 
 	// A lone machine gets no network at all.
 	if got := cfg["NetworkMode"]; got != "none" {
@@ -126,7 +128,7 @@ func TestSandboxDefaults(t *testing.T) {
 // still have no route to the host or the internet.
 func TestMultiHostRunJoinsItsPrivateNetwork(t *testing.T) {
 	d := &Docker{limits: DefaultLimits()}
-	cfg := d.hostConfig([]string{"wge-run-1-net", "wge-run-1-a-b"})
+	cfg := d.hostConfig([]string{"wge-run-1-net", "wge-run-1-a-b"}, 1)
 
 	if got := cfg["NetworkMode"]; got != "wge-run-1-net" {
 		t.Errorf("NetworkMode = %v, want the run's first network", got)
@@ -140,4 +142,35 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// The player's own files are the one thing a rebuild cannot reproduce, so they
+// live on a volume rather than in the container.
+func TestScratchVolumeIsMountedInEveryMachine(t *testing.T) {
+	d := &Docker{limits: DefaultLimits(), scratch: true}
+	cfg := d.hostConfig([]string{"wge-run-7-net"}, 7)
+
+	mounts, ok := cfg["Mounts"].([]map[string]any)
+	if !ok || len(mounts) != 1 {
+		t.Fatalf("Mounts = %v, want one scratch mount", cfg["Mounts"])
+	}
+	if got := mounts[0]["Source"]; got != ScratchVolume(7) {
+		t.Errorf("mount source = %v, want %s", got, ScratchVolume(7))
+	}
+	if got := mounts[0]["Target"]; got != build.ScratchPath {
+		t.Errorf("mount target = %v, want %s", got, build.ScratchPath)
+	}
+}
+
+func TestScratchCanBeTurnedOff(t *testing.T) {
+	d := &Docker{limits: DefaultLimits(), scratch: false}
+	if got, ok := d.hostConfig(nil, 1)["Mounts"]; ok {
+		t.Errorf("Mounts = %v with scratch disabled", got)
+	}
+}
+
+func TestScratchVolumeIsPerRun(t *testing.T) {
+	if ScratchVolume(1) == ScratchVolume(2) {
+		t.Fatal("two runs share a scratch volume")
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/klahr/wge/internal/build"
 	"github.com/klahr/wge/internal/manifest"
 	"github.com/klahr/wge/internal/store"
 
@@ -219,7 +220,13 @@ func (s *Server) enroll(ctx context.Context, o *outcome, sess *Session) {
 	fmt.Fprintf(out, "\r\nWrite it down. Reconnect with:\r\n\r\n    ssh %s@<this host>\r\n", game.ID)
 	fmt.Fprintf(out, "\r\nThese credentials are yours alone -- another player's notes will not\r\n")
 	fmt.Fprintf(out, "open your copy of the game. Each level you reach ends in the credential\r\n")
-	fmt.Fprintf(out, "for the next; log back in with it to continue.\r\n\r\n")
+	fmt.Fprintf(out, "for the next; log back in with it to continue.\r\n")
+
+	// The one thing worth saying out of character about the machines: an idle
+	// box is eventually rebuilt, and anything written outside this directory
+	// goes with it.
+	fmt.Fprintf(out, "\r\nAnything you leave in %s is kept between sessions.\r\n", build.ScratchPath)
+	fmt.Fprintf(out, "The rest of the machine is rebuilt when you have been away a while.\r\n\r\n")
 }
 
 // chooseGame asks which game to start, skipping the question when there is

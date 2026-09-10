@@ -320,9 +320,29 @@ the right thing rather than a compromise: nothing can tell whether a player is
 still behind them, and rebuilding one costs a reconnection.
 
 All of this is only safe because of the invariant. Reaping a container costs a
-player their scrollback and whatever they wrote, and nothing else — the same
-password opens the rebuilt box, because the box is a pure function of the salt.
-(Persisting the scratch they wrote is the obvious next improvement.)
+player their scrollback and nothing else — the same password opens the rebuilt
+box, because the box is a pure function of the salt.
+
+The one thing that is *not* a function of the salt is what the player wrote
+themselves, so that lives on a volume rather than in the container:
+`/srv/scratch` is mounted into every machine in the run, survives reaping, and
+follows the player when they pivot. Enrollment says so in as many words, since
+it is the one place the engine speaks out of character.
+
+Getting a shared scratch to actually be shared took two goes. Copying `/tmp`'s
+`1777` looks right and fails twice: the kernel's `fs.protected_regular` refuses
+to open a file owned by another user with `O_CREAT` inside a world-writable
+sticky directory — and `>>` passes `O_CREAT` — so a note written under one level
+could be read under the next but never appended to. Dropping the sticky bit
+lands on the ordinary permission instead, since a file created with the default
+umask is `0664` owned by its author's private group. It is now done the way a
+shared project directory is done on any Unix box: a `scratch` group every
+login account belongs to, setgid so new files inherit it, and `UMASK 002` in
+`login.defs`. Both of the defaults that got in the way exist to protect users
+from each other, and inside one run every account is the same person.
+
+The volume is not quota'd. A disk quota on the backing filesystem is the only
+control, the same as for the container's own writable layer.
 
 While a run has a live container, `runs.current_host` pins it to that machine so
 a returning player is sent back to the box they left; the reaper clears it when

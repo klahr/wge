@@ -305,3 +305,47 @@ func startFromImage(t *testing.T, api *docker.Client, name, image string, runID 
 		_ = api.Delete(context.Background(), "/containers/"+name+"?force=true&v=true")
 	})
 }
+
+// A reap takes the machines and leaves the notes. This is the whole point of
+// the volume: everything else about a box is a pure function of the salt and
+// costs nothing to rebuild, and the player's own files are not.
+func TestReapingKeepsTheScratchVolume(t *testing.T) {
+	api := requireEngine(t)
+	ctx := context.Background()
+	d := newTestDocker(t, &recordingRuns{set: make(chan string, 4)})
+
+	const runID = 9201
+	name := ContainerName(runID, "main")
+	volume := ScratchVolume(runID)
+
+	labels := map[string]string{"wge.run": fmt.Sprint(runID)}
+	if err := api.CreateVolume(ctx, volume, labels); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	t.Cleanup(func() { _ = api.RemoveVolume(context.Background(), volume) })
+
+	startLabelled(t, api, name, runID)
+
+	d.sweepOnce(ctx)
+
+	if exists(t, api, name) {
+		t.Fatal("the machine survived the sweep")
+	}
+
+	volumes, err := api.ListVolumes(ctx, "wge.run="+fmt.Sprint(runID))
+	if err != nil {
+		t.Fatalf("list volumes: %v", err)
+	}
+	if len(volumes) != 1 {
+		t.Fatalf("the sweep took the scratch volume with the machines; found %d", len(volumes))
+	}
+
+	// And a reset is what removes it.
+	if err := d.RemoveScratch(ctx, runID); err != nil {
+		t.Fatalf("RemoveScratch: %v", err)
+	}
+	volumes, _ = api.ListVolumes(ctx, "wge.run="+fmt.Sprint(runID))
+	if len(volumes) != 0 {
+		t.Fatalf("RemoveScratch left %d volumes", len(volumes))
+	}
+}

@@ -100,3 +100,40 @@ func (d *Client) ListNetworks(ctx context.Context, label string) ([]Network, err
 	}
 	return out, nil
 }
+
+// Volume is a named volume as the engine reports it.
+type Volume struct {
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels"`
+}
+
+// CreateVolume makes a named volume, or does nothing if it already exists.
+//
+// Volumes are the one part of a run that is meant to outlive its containers,
+// so creation is idempotent by design: a run that has been reaped and rebuilt
+// finds the volume it had before.
+func (d *Client) CreateVolume(ctx context.Context, name string, labels map[string]string) error {
+	body := map[string]any{"Name": name, "Driver": "local", "Labels": labels}
+	return d.Post(ctx, "/volumes/create", body, nil)
+}
+
+// RemoveVolume deletes a named volume and everything in it.
+func (d *Client) RemoveVolume(ctx context.Context, name string) error {
+	return d.Delete(ctx, "/volumes/"+url.PathEscape(name)+"?force=true")
+}
+
+// ListVolumes returns every volume carrying the given label.
+func (d *Client) ListVolumes(ctx context.Context, label string) ([]Volume, error) {
+	filters, err := json.Marshal(map[string][]string{"label": {label}})
+	if err != nil {
+		return nil, err
+	}
+
+	var out struct {
+		Volumes []Volume `json:"Volumes"`
+	}
+	if err := d.Get(ctx, "/volumes?filters="+url.QueryEscape(string(filters)), &out); err != nil {
+		return nil, fmt.Errorf("list volumes: %w", err)
+	}
+	return out.Volumes, nil
+}
