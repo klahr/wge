@@ -3,3 +3,4 @@
 /wge.db-shm
 /wge.db-wal
 /host_key
+bin/

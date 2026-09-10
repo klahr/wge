@@ -512,6 +512,29 @@ becoming root *inside* the container — which is the game working, and is not a
 way out. The compensating control is the setuid audit in `wge test`, which
 proves the box carries exactly the setuid binaries the base image ships.
 
+## Building and testing
+
+`make` is the entry point, and CI runs the same targets rather than a script of
+its own.
+
+```
+make check              # gofmt, vet, a tidy go.mod, and a build
+make test               # the tests that need nothing but Go, with -race
+make base               # the image games are built on
+make games              # every game validates, compiles and enforces its graph
+make test-integration   # the tests that build images and boot containers
+```
+
+The split is by what a target needs, not by how long it takes: `check` and
+`test` need only Go and finish in seconds, and the rest need a Docker engine.
+
+One detail is load-bearing. The container-backed tests skip themselves when
+there is no engine to talk to, which is right on a laptop and wrong in CI: a
+run that skipped everything reports the same green as a run that proved
+something. `make test-integration` sets `WGE_REQUIRE_DOCKER`, which turns those
+skips into failures, so a CI job that cannot reach an engine says so instead of
+passing quietly.
+
 ## Status
 
 Built and tested:

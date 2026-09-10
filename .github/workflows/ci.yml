@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# A superseded run proves nothing about the commit that replaced it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that needs nothing but Go. Minutes, not tens of minutes, so a
+  # mistake in formatting or a stale go.mod is reported before the slow job has
+  # finished pulling Debian.
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make ci
+
+  # The half that needs a Docker engine: building game images, booting them,
+  # and checking from inside that they enforce their own level graphs.
+  #
+  # These tests skip themselves when there is no engine, which is right on a
+  # laptop and wrong here, so `make test-integration` sets WGE_REQUIRE_DOCKER
+  # and a run that proved nothing fails instead of reporting green.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Show the engine
+        run: docker version
+
+      - name: Build the base image
+        run: make base
+
+      - name: Every game validates, compiles and enforces its graph
+        run: make games
+
+      - name: Full test suite
+        run: make test-integration
+
+      - name: Leftovers
+        if: always()
+        run: |
+          echo "containers:"; docker ps -a --filter label=wge.run --format '{{.Names}} {{.Status}}'
+          echo "networks:";   docker network ls --filter label=wge.run --format '{{.Name}}'
+          echo "volumes:";    docker volume ls --filter label=wge.run --format '{{.Name}}'

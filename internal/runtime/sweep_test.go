@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -73,9 +74,22 @@ func requireEngine(t *testing.T) *docker.Client {
 
 	var info struct{ ID string }
 	if err := api.Get(ctx, "/images/"+sweepImage+"/json", &info); err != nil {
-		t.Skipf("image %s is not available: %v", sweepImage, err)
+		unavailable(t, "image %s is not available: %v", sweepImage, err)
 	}
 	return api
+}
+
+// unavailable skips, or fails when the environment has promised Docker.
+//
+// These tests skip themselves when there is no engine, which is right on a
+// laptop and wrong in CI: a run that skipped everything reports the same green
+// as a run that proved something.
+func unavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("WGE_REQUIRE_DOCKER") != "" {
+		t.Fatalf("WGE_REQUIRE_DOCKER is set but "+format, args...)
+	}
+	t.Skipf(format, args...)
 }
 
 // startLabelled creates a container carrying the labels a game container has,
@@ -226,7 +240,7 @@ func TestProgressIsCollectedFromInsideTheRun(t *testing.T) {
 
 	var info struct{ ID string }
 	if err := api.Get(ctx, "/images/"+image+"/json", &info); err != nil {
-		t.Skipf("image %s is not available: %v", image, err)
+		unavailable(t, "image %s is not available: %v", image, err)
 	}
 
 	runs := &recordingRuns{set: make(chan string, 4)}

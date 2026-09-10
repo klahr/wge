@@ -31,9 +31,24 @@ func requireDocker(t *testing.T) *docker.Client {
 
 	var info struct{ ID string }
 	if err := api.Get(ctx, "/images/"+verifyBase+"/json", &info); err != nil {
-		t.Skipf("base image %s is not available: %v", verifyBase, err)
+		unavailable(t, "base image %s is not available: %v", verifyBase, err)
 	}
 	return api
+}
+
+// unavailable skips, or fails when the environment has promised Docker.
+//
+// These tests skip themselves when there is no engine to talk to, which is
+// right on a laptop and wrong in CI: a run that skipped everything reports the
+// same green as a run that proved something. WGE_REQUIRE_DOCKER says the
+// engine and its base image are supposed to be here, and turns the skip into
+// the failure it should be.
+func unavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("WGE_REQUIRE_DOCKER") != "" {
+		t.Fatalf("WGE_REQUIRE_DOCKER is set but "+format, args...)
+	}
+	t.Skipf(format, args...)
 }
 
 // writeGame lays out a three-level chain. Three is the minimum that gives a
