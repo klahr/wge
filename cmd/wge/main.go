@@ -14,6 +14,9 @@ import (
 	"github.com/klahr/wge/internal/manifest"
 )
 
+// version is set at build time; see the dist target.
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "wge: %v\n", err)
@@ -36,6 +39,7 @@ commands:
   invite                 create, list or revoke an invitation to enrol
   reset    <handle> <game>
                          start a player's game over with new credentials
+  version                print the version this binary was built from
 `
 
 func run(args []string) error {
@@ -64,6 +68,9 @@ func run(args []string) error {
 		return cmdInvite(rest)
 	case "reset":
 		return cmdReset(rest)
+	case "version", "-v", "--version":
+		fmt.Println(version)
+		return nil
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
@@ -76,6 +83,9 @@ func run(args []string) error {
 func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyEnv(fs); err != nil {
 		return err
 	}
 	dir := fs.Arg(0)
@@ -100,6 +110,9 @@ func cmdValidate(args []string) error {
 func cmdGraph(args []string) error {
 	fs := flag.NewFlagSet("graph", flag.ExitOnError)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyEnv(fs); err != nil {
 		return err
 	}
 	dir := fs.Arg(0)
@@ -134,6 +147,9 @@ func cmdCreds(args []string) error {
 	fs := flag.NewFlagSet("creds", flag.ExitOnError)
 	salt := fs.String("salt", "", "run salt (hex); a random one is used if empty")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyEnv(fs); err != nil {
 		return err
 	}
 	dir := fs.Arg(0)

@@ -8,7 +8,9 @@ BIN     ?= bin/wge
 GAMES   ?= $(wildcard games/*)
 BASE    ?= bases/debian-13
 
-.PHONY: all check fmt vet tidy build test test-integration base games ci ci-integration clean
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+.PHONY: all check fmt vet tidy build test test-integration base games ci ci-integration dist install clean
 
 all: check test
 
@@ -59,6 +61,21 @@ games: $(BIN)
 		./$(BIN) test $$g || exit 1; \
 	done
 
+## dist: a static binary to put on a server
+##
+## CGO is off because nothing here needs it -- the SQLite driver is pure Go --
+## which makes the result a single file that runs on any Linux of the same
+## architecture, whatever libc it has.
+dist:
+	CGO_ENABLED=0 $(GO) build -trimpath \
+		-ldflags "-s -w -X main.version=$(VERSION)" \
+		-o dist/wge ./cmd/wge
+	@ls -lh dist/wge | awk '{print "  dist/wge", $$5}'
+
+## install: install the binary, the unit and the configuration (needs root)
+install: dist
+	./deploy/install.sh
+
 ## ci: what runs on every push
 ci: check test
 
@@ -66,4 +83,4 @@ ci: check test
 ci-integration: check base games test-integration
 
 clean:
-	rm -rf bin
+	rm -rf bin dist

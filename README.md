@@ -512,6 +512,48 @@ becoming root *inside* the container — which is the game working, and is not a
 way out. The compensating control is the setuid audit in `wge test`, which
 proves the box carries exactly the setuid binaries the base image ships.
 
+## Running it on a machine
+
+```
+make dist                  # a static binary, no libc to match
+sudo ./deploy/install.sh   # user, directories, unit, configuration
+```
+
+The installer is idempotent: run it again to upgrade. It never overwrites
+configuration or game content that is already there, and it does not start
+anything, because the images have to exist first.
+
+```
+sudo -u wge wge base  /var/lib/wge/bases/debian-13
+sudo -u wge wge build /var/lib/wge/games/demo
+sudo -u wge wge test  /var/lib/wge/games/demo
+systemctl enable --now wge
+sudo -u wge wge invite
+```
+
+**`serve` refuses to start if a game's image was never built**, naming the
+image and the command that builds it. The alternative is a server that starts,
+reports itself healthy, and fails at the moment a player presents a correct
+password — which reads to them as a broken game and to whoever deployed it as
+nothing at all.
+
+Every flag has an environment equivalent — `-max-machines` is
+`WGE_MAX_MACHINES` — so the unit carries an `EnvironmentFile` rather than a
+line of flags nobody can comment. A flag given on the command line still wins,
+so a setting can be overridden for one run without editing the file.
+
+Two things worth being straight about:
+
+- **The engine is in the `docker` group, which is root on that host by another
+  name.** That is why it runs as its own user and why the unit drops every
+  capability, forbids new privileges, and confines it to `/var/lib/wge`. None
+  of that makes the socket safe; it limits what a compromise of the engine
+  reaches.
+- **Back up `wge.db`.** It holds the run salts, and a salt is the only thing on
+  the machine that cannot be rebuilt — images, containers, networks and
+  credentials are all derived or disposable. Lose it and every player starts
+  over; keep it and a destroyed host costs nobody their game.
+
 ## Building and testing
 
 `make` is the entry point, and CI runs the same targets rather than a script of

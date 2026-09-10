@@ -669,6 +669,31 @@ func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 	return cfg
 }
 
+// MissingImages returns the images the engine does not have.
+//
+// Checked at startup rather than when somebody connects. A game whose image was
+// never built fails at the moment a player presents a correct password, which
+// reads to them as the game being broken and to an operator as nothing at all
+// -- the server is up, it just cannot serve.
+func (d *Docker) MissingImages(ctx context.Context, images []string) ([]string, error) {
+	var missing []string
+
+	for _, image := range images {
+		var info struct {
+			ID string `json:"Id"`
+		}
+		err := d.api.Get(ctx, "/images/"+image+"/json", &info)
+		switch {
+		case err == nil:
+		case docker.IsNotFound(err):
+			missing = append(missing, image)
+		default:
+			return nil, fmt.Errorf("look for image %s: %w", image, err)
+		}
+	}
+	return missing, nil
+}
+
 // DestroyRun removes everything belonging to a run: its machines, its private
 // networks, and the notes the player kept.
 //

@@ -1,0 +1,61 @@
+[Unit]
+Description=wge -- hacking simulators played over SSH
+Documentation=https://github.com/klahr/wge
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/wge serve
+WorkingDirectory=/var/lib/wge
+EnvironmentFile=/etc/wge/wge.env
+
+User=wge
+Group=wge
+# The engine drives the Docker socket, and membership of that group is root on
+# this host by another name. Everything below is about limiting what reaches
+# the host if the engine itself is compromised; none of it makes the socket
+# safe, and nothing can.
+SupplementaryGroups=docker
+
+Restart=on-failure
+RestartSec=5s
+
+# The engine needs no capability of its own: it opens a socket and talks to a
+# daemon. The containers' capabilities are set by the engine, not inherited
+# from it.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wge
+PrivateTmp=true
+PrivateDevices=true
+
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The database holds the salts, and a salt is the only thing about a run that
+# cannot be rebuilt. Everything else on disk is derived or disposable.
+StateDirectory=wge
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

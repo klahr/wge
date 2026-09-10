@@ -4,3 +4,4 @@
 /wge.db-wal
 /host_key
 bin/
+dist/

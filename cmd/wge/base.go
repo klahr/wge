@@ -21,6 +21,9 @@ func cmdBase(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := applyEnv(fs); err != nil {
+		return err
+	}
 	dir := fs.Arg(0)
 	if dir == "" {
 		return fmt.Errorf("usage: wge base [-tag name] <base-dir>")

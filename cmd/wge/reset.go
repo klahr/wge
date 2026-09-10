@@ -28,6 +28,9 @@ func cmdReset(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := applyEnv(fs); err != nil {
+		return err
+	}
 	if fs.NArg() != 2 {
 		return fmt.Errorf("usage: wge reset [-db path] [-games dir] <handle> <game>")
 	}

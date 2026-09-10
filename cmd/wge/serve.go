@@ -5,12 +5,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/klahr/wge/internal/broker"
@@ -39,6 +41,9 @@ func cmdServe(args []string) error {
 	socket := fs.String("docker", runtime.DefaultSocket, "Docker engine socket")
 	verbose := fs.Bool("v", false, "log at debug level")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyEnv(fs); err != nil {
 		return err
 	}
 
@@ -86,6 +91,10 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	if err := requireImages(ctx, rt, lib); err != nil {
+		return err
+	}
+
 	// Collect abandoned containers for as long as the broker is serving. The
 	// first pass runs immediately and clears whatever a previous process left.
 	go rt.Run(ctx)
@@ -114,6 +123,50 @@ func cmdServe(args []string) error {
 		"enrollment", enrollmentMode(*open))
 
 	return srv.Serve(ctx)
+}
+
+// requireImages refuses to serve a game whose image was never built.
+//
+// The alternative is a server that starts, reports itself healthy, and fails
+// at the moment a player presents a correct password -- which reads to them as
+// a broken game and to whoever deployed it as nothing at all.
+func requireImages(ctx context.Context, rt *runtime.Docker, lib *library.Library) error {
+	var want []string
+	source := map[string]string{}
+
+	for _, g := range lib.All() {
+		for _, h := range g.HostIDs() {
+			image := library.ImageName(g.ID, g.Version, h)
+			want = append(want, image)
+			source[image] = g.Dir
+		}
+	}
+
+	missing, err := rt.MissingImages(ctx, want)
+	if err != nil {
+		return fmt.Errorf("check game images: %w", err)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	// One line per game rather than per image: a two-machine game is one
+	// build, and telling somebody to run it twice is telling them wrong.
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d game image(s) have not been built:\n", len(missing))
+	for _, image := range missing {
+		fmt.Fprintf(&b, "  %s\n", image)
+	}
+
+	seen := map[string]bool{}
+	b.WriteString("\nbuild them with:\n")
+	for _, image := range missing {
+		if dir := source[image]; !seen[dir] {
+			seen[dir] = true
+			fmt.Fprintf(&b, "  wge build %s\n", dir)
+		}
+	}
+	return errors.New(strings.TrimRight(b.String(), "\n"))
 }
 
 func enrollmentMode(open bool) string {

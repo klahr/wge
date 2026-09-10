@@ -29,6 +29,9 @@ func cmdInvite(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := applyEnv(fs); err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	st, err := store.Open(ctx, *dbPath)
