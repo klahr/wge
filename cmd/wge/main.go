@@ -33,6 +33,8 @@ commands:
   build    <game-dir>    compile a game into a container image
   test     <game-dir>    verify a built image enforces its level graph
   serve                  run the SSH front door
+  reset    <handle> <game>
+                         start a player's game over with new credentials
 `
 
 func run(args []string) error {
@@ -57,6 +59,8 @@ func run(args []string) error {
 		return cmdTest(rest)
 	case "serve":
 		return cmdServe(rest)
+	case "reset":
+		return cmdReset(rest)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil

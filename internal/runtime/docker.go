@@ -655,6 +655,50 @@ func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 	return cfg
 }
 
+// DestroyRun removes everything belonging to a run: its machines, its private
+// networks, and the notes the player kept.
+//
+// This is what a reset needs and what the reaper deliberately will not do. A
+// reap leaves the scratch alone and lets the grace period run, because the
+// player is coming back to the same game; a reset is the opposite on both
+// counts. The machines have to go immediately rather than at the end of a
+// grace period, or the player reconnects to a box still seeded with the
+// credentials they asked to be rid of.
+func (d *Docker) DestroyRun(ctx context.Context, runID int64) error {
+	containers, err := d.api.ListContainers(ctx, fmt.Sprintf("wge.run=%d", runID))
+	if err != nil {
+		return fmt.Errorf("list run containers: %w", err)
+	}
+
+	for _, c := range containers {
+		name := c.Name()
+		if name == "" {
+			continue
+		}
+		if err := d.remove(ctx, name); err != nil && !docker.IsNotFound(err) {
+			return fmt.Errorf("remove %s: %w", name, err)
+		}
+		d.reaper.forget(name)
+		d.creating.Delete(name)
+		d.authOffsets.Delete(name)
+	}
+
+	d.removeNetworks(ctx, runID)
+
+	if err := d.RemoveScratch(ctx, runID); err != nil {
+		return fmt.Errorf("remove scratch: %w", err)
+	}
+
+	if d.runs != nil {
+		if err := d.runs.SetHost(ctx, runID, ""); err != nil {
+			d.log.Error("clear run placement", "run", runID, "error", err)
+		}
+	}
+
+	d.log.Info("run destroyed", "run", runID, "machines", len(containers))
+	return nil
+}
+
 // RemoveScratch deletes a run's scratch space and everything in it.
 //
 // Nothing calls it during play. It is what a reset is supposed to do: a run

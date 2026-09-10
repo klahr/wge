@@ -349,3 +349,61 @@ func TestReapingKeepsTheScratchVolume(t *testing.T) {
 		t.Fatalf("RemoveScratch left %d volumes", len(volumes))
 	}
 }
+
+// A reset takes everything, including the notes a reap deliberately keeps.
+func TestDestroyRunTakesMachinesNetworksAndScratch(t *testing.T) {
+	api := requireEngine(t)
+	ctx := context.Background()
+	runs := &recordingRuns{set: make(chan string, 4)}
+	d := newTestDocker(t, runs)
+
+	const runID = 9301
+	name := ContainerName(runID, "main")
+	volume := ScratchVolume(runID)
+	network := RunNetwork(runID)
+	labels := map[string]string{"wge.run": fmt.Sprint(runID)}
+
+	if err := api.CreateVolume(ctx, volume, labels); err != nil {
+		t.Fatalf("create volume: %v", err)
+	}
+	t.Cleanup(func() { _ = api.RemoveVolume(context.Background(), volume) })
+
+	if err := api.CreateNetwork(ctx, network, labels); err != nil {
+		t.Fatalf("create network: %v", err)
+	}
+	t.Cleanup(func() { _ = api.RemoveNetwork(context.Background(), network) })
+
+	startLabelled(t, api, name, runID)
+
+	// A live claim must not save it: a reset is explicit, and the player asked.
+	d.reaper.hold(target{Name: name, RunID: runID})
+
+	if err := d.DestroyRun(ctx, runID); err != nil {
+		t.Fatalf("DestroyRun: %v", err)
+	}
+
+	if exists(t, api, name) {
+		t.Error("the machine survived the reset")
+	}
+
+	volumes, err := api.ListVolumes(ctx, "wge.run="+fmt.Sprint(runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(volumes) != 0 {
+		t.Errorf("the reset left %d scratch volumes; the old notes hold the old answers", len(volumes))
+	}
+
+	networks, err := api.ListNetworks(ctx, "wge.run="+fmt.Sprint(runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(networks) != 0 {
+		t.Errorf("the reset left %d networks", len(networks))
+	}
+
+	// The reaper must not be left holding a name that no longer exists.
+	if d.reaper.heldNames()[name] {
+		t.Error("the reaper still holds a destroyed machine")
+	}
+}

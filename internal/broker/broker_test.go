@@ -22,11 +22,26 @@ import (
 // fakeRuntime stands in for Docker. It records what the broker asked for and
 // prints a line the test can recognise.
 type fakeRuntime struct {
-	mu       sync.Mutex
-	attached []string // level ids, in order
-	lastTerm string
-	lastSize WindowSize
-	lastCmd  string
+	mu        sync.Mutex
+	attached  []string // level ids, in order
+	lastTerm  string
+	lastSize  WindowSize
+	lastCmd   string
+	destroyed []int64
+}
+
+// DestroyRun makes the fake a Resetter.
+func (f *fakeRuntime) DestroyRun(_ context.Context, runID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.destroyed = append(f.destroyed, runID)
+	return nil
+}
+
+func (f *fakeRuntime) destroyedRuns() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64{}, f.destroyed...)
 }
 
 func (f *fakeRuntime) Attach(_ context.Context, s *Session) (int, error) {
@@ -576,4 +591,121 @@ func runShell(t *testing.T, client *ssh.Client) string {
 		}
 	}
 	return string(out)
+}
+
+// enrollAgain reconnects to the enrollment entrance as a known player and
+// answers the reset question with the given line.
+func (h *harness) enrollAgain(t *testing.T, key ssh.Signer, answer string) string {
+	t.Helper()
+
+	client, err := ssh.Dial("tcp", h.addr, &ssh.ClientConfig{
+		User:            EnrollUser,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(key)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial enrollment: %v", err)
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	sess.Stdout = &out
+	sess.Stderr = &out
+
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(stdin, "%s\r", answer)
+	_ = sess.Wait()
+
+	return out.String()
+}
+
+// A reset is the remedy the derivation was designed around: the same puzzles
+// come back with different answers, and no image is rebuilt.
+func TestResetGivesTheSameGameNewAnswers(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	key := newSigner(t)
+
+	before := h.enroll(t, key, "rook")
+
+	player, _ := h.store.PlayerByKey(ctx, ssh.FingerprintSHA256(key.PublicKey()))
+	run, _ := h.store.Run(ctx, player.ID, h.game.ID)
+	if err := h.store.RecordProgress(ctx, run.ID, "mailroom"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := h.enrollAgain(t, key, "reset")
+	after := extractPassword(t, out)
+	if after == "" {
+		t.Fatalf("reset did not hand over a new password; output:\n%s", out)
+	}
+
+	if after == before {
+		t.Fatal("the credentials did not change; a spoiled run stays spoiled")
+	}
+
+	// The machines carrying the old credentials must be gone.
+	if got := h.runtime.destroyedRuns(); len(got) != 1 || got[0] != run.ID {
+		t.Fatalf("destroyed runs = %v, want [%d]", got, run.ID)
+	}
+
+	progress, err := h.store.Progress(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) != 0 {
+		t.Fatalf("reset left %d progress rows", len(progress))
+	}
+
+	// And the run is the same run, not a second one.
+	fresh, err := h.store.Run(ctx, player.ID, h.game.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ID != run.ID {
+		t.Fatalf("reset created run %d instead of re-rolling %d", fresh.ID, run.ID)
+	}
+}
+
+// Anything other than the word leaves the game alone. A menu number would be
+// too easy to press by accident for something irreversible.
+func TestEnrollmentWithoutTheWordDoesNotReset(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	key := newSigner(t)
+
+	before := h.enroll(t, key, "rook")
+	player, _ := h.store.PlayerByKey(ctx, ssh.FingerprintSHA256(key.PublicKey()))
+	run, _ := h.store.Run(ctx, player.ID, h.game.ID)
+	if err := h.store.RecordProgress(ctx, run.ID, "mailroom"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, answer := range []string{"", "y", "yes", "RESET please", "1"} {
+		out := h.enrollAgain(t, key, answer)
+		if got := extractPassword(t, out); got != before {
+			t.Fatalf("answering %q changed the password", answer)
+		}
+	}
+
+	if got := h.runtime.destroyedRuns(); len(got) != 0 {
+		t.Fatalf("machines were destroyed without the word being typed: %v", got)
+	}
+	progress, _ := h.store.Progress(ctx, run.ID)
+	if len(progress) != 1 {
+		t.Fatalf("progress was disturbed: %v", progress)
+	}
 }

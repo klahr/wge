@@ -210,10 +210,28 @@ func (s *Server) enroll(ctx context.Context, o *outcome, sess *Session) {
 	}
 
 	if resuming {
-		fmt.Fprintf(out, "\r\nYou already have this game in progress. Its first account is %s,\r\n", entry.User)
-		fmt.Fprintf(out, "and the password is:\r\n\r\n    %s\r\n", password)
-		fmt.Fprintf(out, "\r\nYour progress is untouched.\r\n\r\n")
-		return
+		wanted, err := s.offerReset(ctx, sess, run, entry)
+		if err != nil {
+			fmt.Fprintf(sess.Stderr, "%v\r\n", err)
+			return
+		}
+		if !wanted {
+			fmt.Fprintf(out, "\r\nIts first account is %s, and the password is:\r\n\r\n    %s\r\n",
+				entry.User, password)
+			fmt.Fprintf(out, "\r\nYour progress is untouched.\r\n\r\n")
+			return
+		}
+
+		// The salt has been re-rolled, so everything derived from it has
+		// changed; read the run back rather than trusting the copy in hand.
+		run, err = s.cfg.Store.Run(ctx, player.ID, game.ID)
+		if err != nil {
+			fmt.Fprintf(sess.Stderr, "the reset did not complete, try again shortly\r\n")
+			return
+		}
+		password = run.Deriver().Password(entry.ID)
+
+		fmt.Fprintf(out, "\r\nDone. This is a new game: the same puzzles, different answers.\r\n")
 	}
 
 	fmt.Fprintf(out, "\r\nYour account is %s. The password is:\r\n\r\n    %s\r\n", entry.User, password)
@@ -227,6 +245,61 @@ func (s *Server) enroll(ctx context.Context, o *outcome, sess *Session) {
 	// goes with it.
 	fmt.Fprintf(out, "\r\nAnything you leave in %s is kept between sessions.\r\n", build.ScratchPath)
 	fmt.Fprintf(out, "The rest of the machine is rebuilt when you have been away a while.\r\n\r\n")
+}
+
+// offerReset asks whether to start the game over, and does it.
+//
+// The word has to be typed out. A reset is the one irreversible thing a player
+// can do to themselves here -- new credentials throughout, progress gone, notes
+// gone -- and a menu number is too easy to press by accident.
+func (s *Server) offerReset(
+	ctx context.Context, sess *Session, run *store.Run, entry *manifest.Level,
+) (bool, error) {
+	out := sess.Stdout
+
+	fmt.Fprintf(out, "\r\nYou already have this game in progress.\r\n")
+	fmt.Fprintf(out, "\r\n%s\r\n",
+		wrap("Press enter to see the first password again, or type reset to start "+
+			"over. A reset gives you new credentials throughout, and erases your "+
+			"progress along with anything you left in "+build.ScratchPath+".", 72))
+	fmt.Fprintf(out, "\r\n> ")
+
+	line, err := readLine(sess.Stdin, sess.Stdout)
+	if err != nil {
+		return false, nil // hung up; nothing has been touched
+	}
+	if strings.ToLower(strings.TrimSpace(line)) != "reset" {
+		return false, nil
+	}
+
+	// The machines go first. Re-rolling the salt while a box carrying the old
+	// credentials is still up would leave the player with a game whose answers
+	// depend on which of the two they reach.
+	resetter, ok := s.cfg.Runtime.(Resetter)
+	if !ok {
+		return false, fmt.Errorf("this server cannot reset games")
+	}
+	if err := resetter.DestroyRun(ctx, run.ID); err != nil {
+		s.log.Error("destroy run for reset", "run", run.ID, "error", err)
+		return false, fmt.Errorf("could not take the machines down, nothing has changed")
+	}
+
+	if err := s.cfg.Store.ResetRun(ctx, run.ID, entryGameVersion(s, run)); err != nil {
+		s.log.Error("reset run", "run", run.ID, "error", err)
+		return false, fmt.Errorf("the machines are down but the reset did not complete; reconnect to try again")
+	}
+
+	s.log.Info("run reset", "run", run.ID)
+	return true, nil
+}
+
+// entryGameVersion is the version a reset adopts: the one being served now,
+// not the one the abandoned run was pinned to.
+func entryGameVersion(s *Server, run *store.Run) int {
+	if game, ok := s.cfg.Games.Game(run.GameID); ok {
+		return game.Version
+	}
+	return run.GameVersion
 }
 
 // chooseGame asks which game to start, skipping the question when there is

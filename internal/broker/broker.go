@@ -42,6 +42,16 @@ type Runtime interface {
 	Attach(ctx context.Context, s *Session) (exitCode int, err error)
 }
 
+// Resetter destroys everything belonging to a run.
+//
+// A runtime that implements it lets a player start a game over from the
+// enrollment entrance. Without it a reset can still re-roll the credentials,
+// but the machines carrying the old ones would survive until they were reaped,
+// so the broker refuses rather than handing back a game in two minds.
+type Resetter interface {
+	DestroyRun(ctx context.Context, runID int64) error
+}
+
 // WindowSize is a terminal geometry change.
 type WindowSize struct {
 	Width, Height int

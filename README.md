@@ -221,6 +221,7 @@ wge base     <base-dir>    build a base image games are built on
 wge build    <game-dir>    compile a game into a container image
 wge test     <game-dir>    verify a built image enforces its level graph
 wge serve                  run the SSH front door
+wge reset <handle> <game>  start a player's game over with new credentials
 ```
 
 `serve` takes `-grace` (how long a container outlives its last session, default
@@ -304,6 +305,24 @@ no timestamp is parsed, which matters because syslog lines carry no year.
 
 A failed `su` records nothing, and a session opened as a decoy account is not a
 level, so neither reaches the table.
+
+## Resetting a game
+
+A spoiled run is the case the derivation was designed around, and the remedy
+costs nothing: re-roll the salt and the same puzzles come back with different
+answers. No image is rebuilt and no game content is touched.
+
+A player can do it themselves at the enrollment entrance, which is the one
+place the engine speaks out of character. The word has to be typed out —
+a reset is the only irreversible thing a player can do to themselves here, and
+a menu number is too easy to press by accident. An operator can do it with
+`wge reset <handle> <game>`, whether or not a server is running.
+
+Order matters more than it looks. The machines are taken down **before** the
+salt is re-rolled: a box still carrying the old credentials would leave the
+player with a game whose answers depend on which of the two they reached. And
+a reset takes the scratch volume that a reap deliberately keeps, because notes
+written against the old credentials are the old answers.
 
 ## Container lifecycle
 

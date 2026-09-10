@@ -141,6 +141,24 @@ func (s *Store) PlayerByKey(ctx context.Context, fingerprint string) (*Player, e
 	return &p, nil
 }
 
+// PlayerByHandle resolves a player's chosen name, for the operator commands
+// where a public key is not what somebody has to hand.
+func (s *Store) PlayerByHandle(ctx context.Context, handle string) (*Player, error) {
+	var p Player
+	var created int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, handle, created_at FROM players WHERE handle = ?`, handle).
+		Scan(&p.ID, &p.Handle, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.CreatedAt = time.Unix(created, 0)
+	return &p, nil
+}
+
 // AddKey associates another public key with an existing player.
 func (s *Store) AddKey(ctx context.Context, playerID int64, fingerprint string) error {
 	_, err := s.db.ExecContext(ctx,

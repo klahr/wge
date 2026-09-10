@@ -189,3 +189,20 @@ func TestStickyHostIsSetAndCleared(t *testing.T) {
 		t.Fatalf("CurrentHost = %q after clearing", got.CurrentHost)
 	}
 }
+
+func TestPlayerLookupByHandle(t *testing.T) {
+	s, ctx := open(t)
+	created, _ := s.CreatePlayer(ctx, "rook", "SHA256:aaa")
+
+	got, err := s.PlayerByHandle(ctx, "rook")
+	if err != nil {
+		t.Fatalf("PlayerByHandle: %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("got player %d, want %d", got.ID, created.ID)
+	}
+
+	if _, err := s.PlayerByHandle(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown handle: got %v, want ErrNotFound", err)
+	}
+}
