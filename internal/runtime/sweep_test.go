@@ -26,16 +26,31 @@ type stubImages struct{}
 
 func (stubImages) Image(string, int, string) (string, error) { return sweepImage, nil }
 
-type stubSeeder struct{}
+// stubSeeder records the engine it was handed. Which engine that is, is the
+// whole of the seeder's contract in a pool: seeding the wrong one leaves the
+// player looking at template text on a container nobody wrote to.
+type stubSeeder struct {
+	mu    sync.Mutex
+	sawOn []string
+}
 
-func (stubSeeder) Seed(context.Context, string, *manifest.Game, string, *build.RunSecrets) error {
+func (s *stubSeeder) Seed(_ context.Context, api *docker.Client, _ string, _ *manifest.Game, _ string, _ *build.RunSecrets) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sawOn = append(s.sawOn, api.Endpoint())
 	return nil
+}
+
+func (s *stubSeeder) engines() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string{}, s.sawOn...)
 }
 
 // recordingRuns captures the placement and progress calls the runtime makes.
 type recordingRuns struct {
-	set   chan string
-	runID int64
+	set     chan string
+	cleared chan string
 
 	mu       sync.Mutex
 	progress []string
@@ -54,13 +69,26 @@ func (r *recordingRuns) reached() []string {
 	return append([]string{}, r.progress...)
 }
 
-func (r *recordingRuns) SetHost(_ context.Context, runID int64, node string) error {
-	r.runID = runID
+func (r *recordingRuns) SetHost(_ context.Context, _ int64, node string) error {
 	select {
 	case r.set <- node:
 	default:
 	}
 	return nil
+}
+
+// ClearHost stands in for the conditional update: it unpins only if the run is
+// where the caller thinks it is.
+func (r *recordingRuns) ClearHost(_ context.Context, _ int64, node string) error {
+	select {
+	case r.cleared <- node:
+	default:
+	}
+	return nil
+}
+
+func newRecordingRuns() *recordingRuns {
+	return &recordingRuns{set: make(chan string, 4), cleared: make(chan string, 4)}
 }
 
 func requireEngine(t *testing.T) *docker.Client {
@@ -135,11 +163,13 @@ func exists(t *testing.T, api *docker.Client, name string) bool {
 	return false
 }
 
-func newTestDocker(t *testing.T, runs Runs) *Docker {
+// newTestDocker builds a pool of one and hands back the machine inside it, so
+// the node-level behaviour under test is reached through the real constructor.
+func newTestDocker(t *testing.T, runs Runs) *node {
 	t.Helper()
 	d, err := NewDocker(Options{
 		Images: stubImages{},
-		Seeder: stubSeeder{},
+		Seeder: &stubSeeder{},
 		Runs:   runs,
 		Node:   "test-node",
 		Grace:  testGrace,
@@ -148,7 +178,7 @@ func newTestDocker(t *testing.T, runs Runs) *Docker {
 	if err != nil {
 		t.Fatalf("NewDocker: %v", err)
 	}
-	return d
+	return d.nodes[0]
 }
 
 // A container left by a previous engine process has nothing holding it, and
@@ -156,7 +186,7 @@ func newTestDocker(t *testing.T, runs Runs) *Docker {
 // rebuilding costs one reconnection, and leaking it costs the host.
 func TestSweepCollectsContainersLeftByAPreviousProcess(t *testing.T) {
 	api := requireEngine(t)
-	runs := &recordingRuns{set: make(chan string, 4)}
+	runs := newRecordingRuns()
 	d := newTestDocker(t, runs)
 
 	const name = "wge-run-9001-main"
@@ -171,11 +201,12 @@ func TestSweepCollectsContainersLeftByAPreviousProcess(t *testing.T) {
 		t.Fatal("an abandoned container survived the sweep")
 	}
 
-	// And the run is no longer pinned to this machine.
+	// And the run is no longer pinned to this machine -- to this one by name,
+	// so a pool member cannot unpin a run that lives on another.
 	select {
-	case node := <-runs.set:
-		if node != "" {
-			t.Fatalf("placement set to %q, want it cleared", node)
+	case node := <-runs.cleared:
+		if node != "test-node" {
+			t.Fatalf("placement cleared for %q, want test-node", node)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the run's placement was never cleared")
@@ -185,7 +216,7 @@ func TestSweepCollectsContainersLeftByAPreviousProcess(t *testing.T) {
 // The sweep must not take a container out from under a live session.
 func TestSweepSparesHeldContainers(t *testing.T) {
 	api := requireEngine(t)
-	d := newTestDocker(t, &recordingRuns{set: make(chan string, 4)})
+	d := newTestDocker(t, newRecordingRuns())
 
 	const name = "wge-run-9002-main"
 	startLabelled(t, api, name, 9002)
@@ -205,7 +236,7 @@ func TestSweepSparesHeldContainers(t *testing.T) {
 // be reconnecting.
 func TestSweepSparesContainersAwaitingTheirGracePeriod(t *testing.T) {
 	api := requireEngine(t)
-	d := newTestDocker(t, &recordingRuns{set: make(chan string, 4)})
+	d := newTestDocker(t, newRecordingRuns())
 
 	const name = "wge-run-9003-main"
 	startLabelled(t, api, name, 9003)
@@ -244,7 +275,7 @@ func TestProgressIsCollectedFromInsideTheRun(t *testing.T) {
 		unavailable(t, "image %s is not available: %v", image, err)
 	}
 
-	runs := &recordingRuns{set: make(chan string, 4)}
+	runs := newRecordingRuns()
 	d := newTestDocker(t, runs)
 
 	name := ContainerName(runID, "relay2")
@@ -327,7 +358,7 @@ func startFromImage(t *testing.T, api *docker.Client, name, image string, runID 
 func TestReapingKeepsTheScratchVolume(t *testing.T) {
 	api := requireEngine(t)
 	ctx := context.Background()
-	d := newTestDocker(t, &recordingRuns{set: make(chan string, 4)})
+	d := newTestDocker(t, newRecordingRuns())
 
 	const runID = 9201
 	name := ContainerName(runID, "main")
@@ -369,7 +400,7 @@ func TestReapingKeepsTheScratchVolume(t *testing.T) {
 func TestDestroyRunTakesMachinesNetworksAndScratch(t *testing.T) {
 	api := requireEngine(t)
 	ctx := context.Background()
-	runs := &recordingRuns{set: make(chan string, 4)}
+	runs := newRecordingRuns()
 	d := newTestDocker(t, runs)
 
 	const runID = 9301
@@ -427,7 +458,7 @@ func TestDestroyRunTakesMachinesNetworksAndScratch(t *testing.T) {
 // every game served by it is broken in the one way nobody thinks to check.
 func TestSetuidPreflightPassesUnderTheDefaultRuntime(t *testing.T) {
 	requireEngine(t)
-	d := newTestDocker(t, &recordingRuns{set: make(chan string, 1)})
+	d := newTestDocker(t, newRecordingRuns())
 
 	if err := d.VerifySetuid(context.Background(), sweepImage); err != nil {
 		t.Fatalf("setuid does not work under this runtime, so su(1) cannot: %v", err)
@@ -439,7 +470,7 @@ func TestSetuidPreflightCleansUpAfterItself(t *testing.T) {
 	requireEngine(t)
 	api := requireEngine(t)
 	ctx := context.Background()
-	d := newTestDocker(t, &recordingRuns{set: make(chan string, 1)})
+	d := newTestDocker(t, newRecordingRuns())
 
 	if err := d.VerifySetuid(ctx, sweepImage); err != nil {
 		t.Fatalf("VerifySetuid: %v", err)
@@ -473,7 +504,7 @@ func TestStorageQuotaCheckReachesAVerdict(t *testing.T) {
 	limits.StorageBytes = 32 << 20
 
 	d, err := NewDocker(Options{
-		Images: stubImages{}, Seeder: stubSeeder{},
+		Images: stubImages{}, Seeder: &stubSeeder{},
 		Node: "test-node", Limits: limits,
 		Logger: slog.New(slog.DiscardHandler),
 	})
@@ -496,7 +527,7 @@ func TestStorageQuotaCheckReachesAVerdict(t *testing.T) {
 func TestScratchUsageIsMeasurable(t *testing.T) {
 	api := requireEngine(t)
 	ctx := context.Background()
-	d := newTestDocker(t, &recordingRuns{set: make(chan string, 1)})
+	d := newTestDocker(t, newRecordingRuns())
 
 	const name = "wge-scratch-probe"
 	_ = api.Delete(ctx, "/containers/"+name+"?force=true&v=true")

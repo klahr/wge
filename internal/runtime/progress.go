@@ -48,7 +48,7 @@ func parseSessions(log string) []string {
 // every purpose except this one. No timestamp is parsed: syslog lines carry no
 // year, and an offset taken at a known moment is exact where a parsed date
 // would be a guess.
-func (d *Docker) markLive(ctx context.Context, container string) {
+func (d *node) markLive(ctx context.Context, container string) {
 	size, err := d.fileSize(ctx, container, authLog)
 	if err != nil {
 		d.log.Debug("read auth log size", "name", container, "error", err)
@@ -57,7 +57,7 @@ func (d *Docker) markLive(ctx context.Context, container string) {
 	d.authOffsets.Store(container, size)
 }
 
-func (d *Docker) fileSize(ctx context.Context, container, path string) (int64, error) {
+func (d *node) fileSize(ctx context.Context, container, path string) (int64, error) {
 	res, err := d.api.Exec(ctx, container, docker.ExecOptions{
 		Cmd:  []string{"stat", "-c", "%s", path},
 		User: "root",
@@ -78,7 +78,7 @@ func (d *Docker) fileSize(ctx context.Context, container, path string) (int64, e
 //
 // The box already knows. Nothing is installed to find out, and there is no
 // agent for a player to notice.
-func (d *Docker) collectProgress(s *broker.Session) {
+func (d *node) collectProgress(s *broker.Session) {
 	if d.runs == nil {
 		return
 	}

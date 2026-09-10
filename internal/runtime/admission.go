@@ -28,7 +28,7 @@ const memoryHeadroom = 0.75
 //
 // A player whose machines are already up is always admitted. They are already
 // resident and already counted, and turning them away would free nothing.
-func (d *Docker) admit(ctx context.Context, targets []target) error {
+func (d *node) admit(ctx context.Context, targets []target) error {
 	d.admitMu.Lock()
 	defer d.admitMu.Unlock()
 
@@ -68,7 +68,7 @@ func (d *Docker) admit(ctx context.Context, targets []target) error {
 }
 
 // capacityLimit is how many machines this node will run at once.
-func (d *Docker) capacityLimit(ctx context.Context) int {
+func (d *node) capacityLimit(ctx context.Context) int {
 	d.capacityOnce.Do(func() {
 		if d.maxMachines > 0 {
 			d.capacity = d.maxMachines
@@ -86,7 +86,7 @@ func (d *Docker) capacityLimit(ctx context.Context) int {
 // Asking the engine rather than reading /proc/meminfo is deliberate: the
 // daemon may not be on this machine, and what matters is the memory where the
 // containers will actually run.
-func (d *Docker) deriveCapacity(ctx context.Context) int {
+func (d *node) deriveCapacity(ctx context.Context) int {
 	var info struct {
 		MemTotal int64 `json:"MemTotal"`
 	}

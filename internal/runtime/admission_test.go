@@ -14,11 +14,11 @@ import (
 //
 // The disk floor is off: these tests are about counting machines, and leaving
 // it on would have them ask a Docker engine that is not there.
-func admissionFor(capacity int) *Docker {
+func admissionFor(capacity int) *node {
 	limits := DefaultLimits()
 	limits.MinFreeBytes = 0
 
-	d := &Docker{
+	d := &node{
 		limits:      limits,
 		log:         slog.New(slog.DiscardHandler),
 		maxMachines: capacity,

@@ -29,7 +29,7 @@ type Verifier struct {
 
 // NewVerifier returns a verifier talking to the engine at socket.
 func NewVerifier(socket string) *Verifier {
-	return &Verifier{api: docker.New(socket), seeder: NewSeeder(socket)}
+	return &Verifier{api: docker.New(socket), seeder: NewSeeder()}
 }
 
 // FindingKind classifies what went wrong.
@@ -97,7 +97,7 @@ func (v *Verifier) Verify(ctx context.Context, g *manifest.Game, host, image str
 		_ = v.api.Delete(context.WithoutCancel(ctx), "/containers/"+container+q)
 	}()
 
-	if err := v.seeder.Seed(ctx, container, g, host, secrets); err != nil {
+	if err := v.seeder.Seed(ctx, v.api, container, g, host, secrets); err != nil {
 		return nil, fmt.Errorf("seed verification container: %w", err)
 	}
 

@@ -31,7 +31,7 @@ func TestHumanBytes(t *testing.T) {
 func TestStorageLimitReachesTheHostConfig(t *testing.T) {
 	limits := DefaultLimits()
 	limits.StorageBytes = 64 << 20
-	d := &Docker{limits: limits}
+	d := &node{limits: limits}
 
 	opt, ok := d.hostConfig(nil, 1)["StorageOpt"].(map[string]string)
 	if !ok {
@@ -42,7 +42,7 @@ func TestStorageLimitReachesTheHostConfig(t *testing.T) {
 	}
 
 	// Uncapped is the default, because most drivers cannot enforce one.
-	plain := &Docker{limits: DefaultLimits()}
+	plain := &node{limits: DefaultLimits()}
 	if got, ok := plain.hostConfig(nil, 1)["StorageOpt"]; ok {
 		t.Errorf("StorageOpt = %v with no limit configured", got)
 	}
@@ -66,7 +66,7 @@ func TestDefaultLimitsAreHonest(t *testing.T) {
 
 // Nothing to verify when nothing is configured.
 func TestStorageQuotaCheckIsSkippedWhenUnset(t *testing.T) {
-	d := &Docker{limits: DefaultLimits()}
+	d := &node{limits: DefaultLimits()}
 	if err := d.VerifyStorageQuota(context.Background(), "unused"); err != nil {
 		t.Fatalf("VerifyStorageQuota with no limit: %v", err)
 	}
@@ -87,7 +87,7 @@ func diskFullExample() error {
 	limits := DefaultLimits()
 	limits.MinFreeBytes = 1 << 62 // more than any disk
 
-	d := &Docker{limits: limits, log: discardLogger()}
+	d := &node{limits: limits, log: discardLogger()}
 	d.rootOnce.Do(func() { d.root = "/" })
 	return d.checkDisk(context.Background())
 }

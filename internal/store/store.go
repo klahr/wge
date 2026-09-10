@@ -301,6 +301,18 @@ func (s *Store) SetHost(ctx context.Context, runID int64, host string) error {
 	return err
 }
 
+// ClearHost unpins a run from a machine, but only if that is where it was.
+//
+// The condition is what makes this safe in a pool. Every machine sweeps what it
+// can see, and a machine that collects an old container of a run now living
+// elsewhere would otherwise unpin it from the machine that really holds it --
+// sending the player to a rebuilt box and leaving their scratch behind.
+func (s *Store) ClearHost(ctx context.Context, runID int64, host string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE runs SET current_host = NULL WHERE id = ? AND current_host = ?`, runID, host)
+	return err
+}
+
 // RecordProgress notes that a player has reached a level. It is idempotent: the
 // first arrival is the one worth keeping, and a player may pass through a level
 // many times.

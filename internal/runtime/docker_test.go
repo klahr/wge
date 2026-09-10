@@ -101,7 +101,7 @@ func TestDefaultCapabilitiesPermitPrivilegeDropping(t *testing.T) {
 }
 
 func TestSandboxDefaults(t *testing.T) {
-	d := &Docker{limits: DefaultLimits()}
+	d := &node{limits: DefaultLimits()}
 	cfg := d.hostConfig(nil, 1)
 
 	// A lone machine gets no network at all.
@@ -127,7 +127,7 @@ func TestSandboxDefaults(t *testing.T) {
 // A run with several machines gets private internal networks instead, which
 // still have no route to the host or the internet.
 func TestMultiHostRunJoinsItsPrivateNetwork(t *testing.T) {
-	d := &Docker{limits: DefaultLimits()}
+	d := &node{limits: DefaultLimits()}
 	cfg := d.hostConfig([]string{"wge-run-1-net", "wge-run-1-a-b"}, 1)
 
 	if got := cfg["NetworkMode"]; got != "wge-run-1-net" {
@@ -147,7 +147,7 @@ func contains(list []string, want string) bool {
 // The player's own files are the one thing a rebuild cannot reproduce, so they
 // live on a volume rather than in the container.
 func TestScratchVolumeIsMountedInEveryMachine(t *testing.T) {
-	d := &Docker{limits: DefaultLimits(), scratch: true}
+	d := &node{limits: DefaultLimits(), scratch: true}
 	cfg := d.hostConfig([]string{"wge-run-7-net"}, 7)
 
 	mounts, ok := cfg["Mounts"].([]map[string]any)
@@ -163,7 +163,7 @@ func TestScratchVolumeIsMountedInEveryMachine(t *testing.T) {
 }
 
 func TestScratchCanBeTurnedOff(t *testing.T) {
-	d := &Docker{limits: DefaultLimits(), scratch: false}
+	d := &node{limits: DefaultLimits(), scratch: false}
 	if got, ok := d.hostConfig(nil, 1)["Mounts"]; ok {
 		t.Errorf("Mounts = %v with scratch disabled", got)
 	}
@@ -180,14 +180,14 @@ func TestScratchVolumeIsPerRun(t *testing.T) {
 // container -- a setting that is read and never sent is worse than none,
 // because everything reports success.
 func TestContainerRuntimeReachesTheHostConfig(t *testing.T) {
-	d := &Docker{limits: DefaultLimits(), containerRuntime: "runsc"}
+	d := &node{limits: DefaultLimits(), containerRuntime: "runsc"}
 	if got := d.hostConfig(nil, 1)["Runtime"]; got != "runsc" {
 		t.Fatalf("Runtime = %v, want runsc", got)
 	}
 
 	// Unset means the engine's own default, which is runc; sending an empty
 	// string would be an error rather than a default.
-	plain := &Docker{limits: DefaultLimits()}
+	plain := &node{limits: DefaultLimits()}
 	if got, ok := plain.hostConfig(nil, 1)["Runtime"]; ok {
 		t.Fatalf("Runtime = %v with none configured, want it absent", got)
 	}

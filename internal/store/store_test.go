@@ -181,12 +181,34 @@ func TestStickyHostIsSetAndCleared(t *testing.T) {
 	}
 
 	// The reaper clears it, freeing the run to be scheduled anywhere.
-	if err := s.SetHost(ctx, run.ID, ""); err != nil {
+	if err := s.ClearHost(ctx, run.ID, "node-3"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.Run(ctx, p.ID, "heist")
 	if got.CurrentHost != "" {
 		t.Fatalf("CurrentHost = %q after clearing", got.CurrentHost)
+	}
+}
+
+// Every machine in a pool sweeps what it can see. One that collects an old
+// container belonging to a run now living elsewhere must not unpin it from the
+// machine that really holds it -- that would send the player to a rebuilt box
+// and leave their scratch behind on the old one.
+func TestClearingAPlacementOnlyAffectsTheMachineNamed(t *testing.T) {
+	s, ctx := open(t)
+	p, _ := s.CreatePlayer(ctx, "rook", "SHA256:aaa")
+	run, _ := s.StartRun(ctx, p.ID, "heist", 1)
+
+	if err := s.SetHost(ctx, run.ID, "node-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearHost(ctx, run.ID, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.Run(ctx, p.ID, "heist")
+	if got.CurrentHost != "node-b" {
+		t.Fatalf("CurrentHost = %q, want node-b: another machine unpinned it", got.CurrentHost)
 	}
 }
 

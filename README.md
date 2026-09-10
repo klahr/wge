@@ -279,7 +279,8 @@ wge reset <handle> <game>  start a player's game over with new credentials
 `-max-machines`, `-min-free`, `-scratch-size`, `-storage-size`,
 `-enroll-limit`, `-grace` (how long a container outlives its last session,
 default 15m), `-sweep` (how often abandoned containers are collected, default
-5m) and `-node` (this machine's name in the runs table).
+5m), `-node` (this machine's name in the runs table) and `-nodes` (the pool of
+machines to run containers on).
 
 To play the example game:
 
@@ -513,6 +514,75 @@ Reservation is the same mechanism as reaping: admission takes the reaper's
 hold on every machine the run needs, under the lock the count was taken under,
 so two connections arriving together cannot both be told there is room for one.
 
+## More than one machine
+
+One front door, several machines behind it:
+
+```
+wge serve -nodes "relay=tcp://10.0.0.11:2375,vault=tcp://10.0.0.12:2375"
+```
+
+Each pair is a name and an engine endpoint — a unix path or a `tcp://` address.
+The name is what a run's placement is recorded as, so it has to mean the same
+machine after a restart: change the endpoint and the runs follow it, change the
+name and they do not. Given no `-nodes`, the engine is a pool of one and that
+one is the local socket, which is what every command above assumes. `-node`
+names that one machine and `-nodes` names a pool; setting both is refused,
+because one of them would be ignored and it is not obvious which.
+
+**A placed run goes back where it was.** A container is a pure function of
+`(game_version, run_salt)`, so any machine in the pool could build it — but
+only the machine holding it has the player's scratch space, and that is the one
+thing about a run that cannot be rebuilt. `runs.current_host` is the record,
+and it is written at the moment the container is created rather than at
+scheduling time, so a run is only ever pinned to a machine that really has it.
+
+**A new run goes to the emptiest machine.** Spread rather than packed: losing a
+machine should take as few players with it as possible. The count is the same
+one admission control uses, so a pool member that is full simply stops being
+chosen, and a pool with no room at all refuses the player the way a single
+machine would.
+
+**A machine that leaves takes its scratch with it.** If a run's recorded
+machine is no longer in the pool, it is rescheduled — the game is intact, the
+player's own files are not, and the log says so rather than letting it look
+like corruption.
+
+**A machine only unpins runs from itself.** Every member sweeps what it can
+see, and one that collects an old container of a run now living elsewhere would
+otherwise unpin it from the machine that really holds it. The unpin is a
+conditional update: clear the placement *if* it still names me.
+
+Everything the engine does to a run reaches every machine, not just the one it
+was placed on. The sweep and `wge reset` destroy containers, networks and
+scratch volumes pool-wide, because a run left behind by a pool that has since
+been reconfigured has leftovers where nothing is looking for them. `reset`
+takes the same `-nodes` as `serve`, and needs it: a reset that only reached the
+local machine would re-roll the salt while a box carrying the old credentials
+was still up somewhere else.
+
+Seeding follows the container. A seeder holds no engine of its own — it is
+handed the one the container was created on — because a run seeded against the
+wrong daemon is a player attached to a box full of template text.
+
+Two checks change shape with more than one machine. Missing images are reported
+per machine — `wge/heist:1-relay2 (on vault)` — because "build it" is a
+different instruction depending on where the gap is. Available container
+runtimes are the *intersection*: a runtime only some machines have is one a
+player might or might not get, depending on where they land.
+
+What the pool does not do is move a run. There is no migration, and there does
+not need to be one for the failure that matters: a machine that dies takes its
+scratch either way, and everything else about the run is derived.
+
+The images have to exist on every machine that might serve them. There is no
+distribution step — build on each, or push to a registry and pull.
+
+**A `tcp://` engine endpoint is root on that machine to anyone who can reach the
+port.** The engine does not speak Docker's TLS, so a pool belongs on a network
+only its members are on — a private segment, a WireGuard link, an SSH-forwarded
+socket. Do not bind a game daemon to a public address.
+
 ## Container lifecycle
 
 Containers are created when a player connects and destroyed when they stop
@@ -673,6 +743,13 @@ something. `make test-integration` sets `WGE_REQUIRE_DOCKER`, which turns those
 skips into failures, so a CI job that cannot reach an engine says so instead of
 passing quietly.
 
+The pool tests need a second engine, and start one: a Docker daemon in a
+privileged container, with the game image copied into it. It is the only way to
+prove that a run placed on another machine is created *and seeded* on that
+machine's engine, which a fake cannot show and which is exactly where the first
+version of this got it wrong. `WGE_TEST_NODE_B` points them at a real second
+machine instead.
+
 ## Status
 
 Built and tested:
@@ -683,7 +760,7 @@ Built and tested:
 | `internal/manifest` | authoring format, loader, static validator |
 | `internal/store` | players, runs, progress (no credentials) |
 | `internal/broker` | SSH front door and the auth chain |
-| `internal/runtime` | container lifecycle over the Docker Engine API |
+| `internal/runtime` | container lifecycle and placement over the Docker Engine API |
 | `internal/library` | game loading and image naming |
 | `internal/build` | the image pipeline, the aging pass, seeding, and verification |
 | `internal/docker` | a small Engine API client |
@@ -693,9 +770,6 @@ encrypted SSH key recovered from a staged backup on one machine, its passphrase
 found on another level, and an `ssh` across a private network to a document
 store the front door will not attach anybody to.
 
-Next, roughly in order:
-
-1. **More than one node.** A run is a pure function of its salt and
-   `runs.current_host` already pins it to a machine, so the scheduling is
-   mostly there; what is missing is anything that routes a player to a second
-   node, and the scratch volume is the one thing that does not travel.
+Not done: image distribution. A pool expects every machine to have the images
+already, and building them `n` times or standing up a registry is the
+operator's problem rather than the engine's.

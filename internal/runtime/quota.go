@@ -31,7 +31,7 @@ var ErrDiskFull = errors.New("not enough disk left to start a run")
 // quota, because it is the one they will not watch.
 //
 // So the probe writes past the limit and sees whether it is stopped.
-func (d *Docker) VerifyStorageQuota(ctx context.Context, image string) error {
+func (d *node) VerifyStorageQuota(ctx context.Context, image string) error {
 	if d.limits.StorageBytes <= 0 {
 		return nil
 	}
@@ -103,7 +103,7 @@ func (d *Docker) VerifyStorageQuota(ctx context.Context, image string) error {
 // The path comes from the engine rather than being assumed, because the daemon
 // may keep its data anywhere; the measurement is a plain statfs, which needs no
 // privilege beyond reaching the directory.
-func (d *Docker) freeBytes(ctx context.Context) (int64, error) {
+func (d *node) freeBytes(ctx context.Context) (int64, error) {
 	root, err := d.dockerRoot(ctx)
 	if err != nil {
 		return 0, err
@@ -117,7 +117,7 @@ func (d *Docker) freeBytes(ctx context.Context) (int64, error) {
 }
 
 // dockerRoot asks the engine where it keeps its data, once.
-func (d *Docker) dockerRoot(ctx context.Context) (string, error) {
+func (d *node) dockerRoot(ctx context.Context) (string, error) {
 	d.rootOnce.Do(func() {
 		var info struct {
 			DockerRootDir string `json:"DockerRootDir"`
@@ -139,7 +139,7 @@ func (d *Docker) dockerRoot(ctx context.Context) (string, error) {
 // quota, and it protects everything: a run's writable layer, its scratch, the
 // images, and whatever else shares the filesystem. It is a floor under the
 // host, not a fair share between players.
-func (d *Docker) checkDisk(ctx context.Context) error {
+func (d *node) checkDisk(ctx context.Context) error {
 	if d.limits.MinFreeBytes <= 0 {
 		return nil
 	}
@@ -168,7 +168,7 @@ func (d *Docker) checkDisk(ctx context.Context) error {
 // Measured from inside the run's own container, which already has the volume
 // mounted: the engine cannot read the volume's directory on the host, and does
 // not need to.
-func (d *Docker) scratchUsage(ctx context.Context, container string) (int64, error) {
+func (d *node) scratchUsage(ctx context.Context, container string) (int64, error) {
 	res, err := d.api.Exec(ctx, container, docker.ExecOptions{
 		Cmd:  []string{"sh", "-c", "du -sb " + build.ScratchPath + " 2>/dev/null | cut -f1"},
 		User: "root",

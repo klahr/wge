@@ -14,7 +14,6 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,7 +119,10 @@ type Images interface {
 // happens inside container creation, and a failure there must stop the player
 // being attached rather than drop them into a box full of placeholders.
 type Seeder interface {
-	Seed(ctx context.Context, container string, g *manifest.Game, host string, secrets *build.RunSecrets) error
+	// api is the engine the container is on. In a pool that is not always the
+	// local one, and a seeder holding an engine of its own would write a run's
+	// credentials to whichever machine it happened to be built against.
+	Seed(ctx context.Context, api *docker.Client, container string, g *manifest.Game, host string, secrets *build.RunSecrets) error
 }
 
 // Runs records which machine is holding a run's containers, so a returning
@@ -128,13 +130,18 @@ type Seeder interface {
 type Runs interface {
 	SetHost(ctx context.Context, runID int64, node string) error
 
+	// ClearHost unpins a run, but only from the machine named. A pool member
+	// sweeps only what it can see, and one collecting an old container of a run
+	// that now lives elsewhere must not unpin it from the machine holding it.
+	ClearHost(ctx context.Context, runID int64, node string) error
+
 	// RecordProgress notes that a run reached a level. It is called for levels
 	// the player got to from inside the run, which the front door never sees.
 	RecordProgress(ctx context.Context, runID int64, levelID string) error
 }
 
-// Docker attaches players to containers via the Engine API.
-type Docker struct {
+// node is one machine that runs game containers.
+type node struct {
 	api    *docker.Client
 	log    *slog.Logger
 	images Images
@@ -142,8 +149,8 @@ type Docker struct {
 	runs   Runs
 	limits Limits
 
-	// node identifies this machine in the runs table.
-	node             string
+	// name identifies this machine in the runs table.
+	name             string
 	containerRuntime string
 	reaper           *reaper
 	sweep            time.Duration
@@ -183,6 +190,9 @@ type Options struct {
 	// ContainerRuntime is the OCI runtime containers are created with. Empty
 	// takes the engine's default, which is runc.
 	ContainerRuntime string
+	// Nodes are the machines that run game containers. Empty means one
+	// machine, which is this one.
+	Nodes []Node
 	// MaxMachines caps how many containers this node will run at once. Zero
 	// derives it from the memory the engine reports.
 	MaxMachines int
@@ -198,53 +208,23 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// NewDocker returns a runtime talking to the local Docker engine.
-func NewDocker(opts Options) (*Docker, error) {
-	if opts.Images == nil {
-		return nil, fmt.Errorf("runtime: an image resolver is required")
-	}
-	if opts.Seeder == nil {
-		return nil, fmt.Errorf("runtime: a seeder is required; an unseeded container has no credentials in it")
-	}
-	if opts.Socket == "" {
-		opts.Socket = DefaultSocket
-	}
-	if opts.Logger == nil {
-		opts.Logger = slog.Default()
-	}
-	if opts.Limits.Memory == 0 && opts.Limits.NanoCPUs == 0 && opts.Limits.PidsLimit == 0 {
-		opts.Limits = DefaultLimits()
-	}
-	if opts.Limits.Capabilities == nil {
-		opts.Limits.Capabilities = multiUserCaps
-	}
-
-	if opts.Node == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			return nil, fmt.Errorf("runtime: determine node name: %w", err)
-		}
-		opts.Node = host
-	}
-	if opts.Sweep <= 0 {
-		opts.Sweep = DefaultSweep
-	}
-
-	d := &Docker{
-		api:              docker.New(opts.Socket),
-		log:              opts.Logger,
+// newNode returns one machine's worth of runtime.
+func newNode(name, socket string, opts Options) *node {
+	n := &node{
+		api:              docker.New(socket),
+		log:              opts.Logger.With("node", name),
 		images:           opts.Images,
 		seeder:           opts.Seeder,
 		runs:             opts.Runs,
 		limits:           opts.Limits,
-		node:             opts.Node,
+		name:             name,
 		containerRuntime: opts.ContainerRuntime,
 		sweep:            opts.Sweep,
 		scratch:          !opts.NoScratch,
 		maxMachines:      opts.MaxMachines,
 	}
-	d.reaper = newReaper(opts.Grace, d.destroy)
-	return d, nil
+	n.reaper = newReaper(opts.Grace, n.destroy)
+	return n
 }
 
 // networkMode is the network a container is created on.
@@ -274,7 +254,7 @@ func ContainerName(runID int64, host string) string {
 
 // Attach gives the player a shell on their level, building the run's machines
 // first if this is their first connection since they were last reaped.
-func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
+func (d *node) Attach(ctx context.Context, s *broker.Session) (int, error) {
 	plan := planTopology(s.Game, s.Run.ID)
 
 	// Every container in the run is claimed, not just the one the player lands
@@ -320,7 +300,7 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 }
 
 // ensureTopology brings up the run's networks and every machine on them.
-func (d *Docker) ensureTopology(ctx context.Context, s *broker.Session, plan topology) error {
+func (d *node) ensureTopology(ctx context.Context, s *broker.Session, plan topology) error {
 	labels := map[string]string{"wge.run": fmt.Sprint(s.Run.ID), "wge.game": s.Game.ID}
 
 	if d.scratch {
@@ -347,7 +327,7 @@ func (d *Docker) ensureTopology(ctx context.Context, s *broker.Session, plan top
 
 // ensureContainer creates and starts one of a run's machines if it is not
 // already up. Creation is idempotent by name.
-func (d *Docker) ensureContainer(ctx context.Context, s *broker.Session, host string, networks []string) error {
+func (d *node) ensureContainer(ctx context.Context, s *broker.Session, host string, networks []string) error {
 	name := ContainerName(s.Run.ID, host)
 
 	image, err := d.images.Image(s.Game.ID, s.Run.GameVersion, host)
@@ -398,7 +378,7 @@ func (d *Docker) ensureContainer(ctx context.Context, s *broker.Session, host st
 	defer cancel()
 
 	secrets := build.NewRunSecrets(s.Game, s.Run.Deriver(), s.Player.Handle)
-	if err := d.seeder.Seed(seedCtx, name, s.Game, host, secrets); err != nil {
+	if err := d.seeder.Seed(seedCtx, d.api, name, s.Game, host, secrets); err != nil {
 		// A half-seeded container is worse than none: remove it so the next
 		// attempt builds a clean one rather than reusing this.
 		if rmErr := d.remove(ctx, name); rmErr != nil && !docker.IsNotFound(rmErr) {
@@ -409,7 +389,7 @@ func (d *Docker) ensureContainer(ctx context.Context, s *broker.Session, host st
 
 	// Sticky routing: while this container is alive the player comes back here.
 	if d.runs != nil {
-		if err := d.runs.SetHost(ctx, s.Run.ID, d.node); err != nil {
+		if err := d.runs.SetHost(ctx, s.Run.ID, d.name); err != nil {
 			d.log.Error("record run placement", "run", s.Run.ID, "error", err)
 		}
 	}
@@ -435,7 +415,7 @@ const BootTimeout = 25 * time.Second
 // sysvinit's rc script is the whole of it: while that process is alive the
 // runlevel is still being entered, and when it exits every service that is
 // going to start has started.
-func (d *Docker) waitForBoot(ctx context.Context, name string) {
+func (d *node) waitForBoot(ctx context.Context, name string) {
 	ctx, cancel := context.WithTimeout(ctx, BootTimeout)
 	defer cancel()
 
@@ -469,7 +449,7 @@ func (d *Docker) waitForBoot(ctx context.Context, name string) {
 // quota. It is still worth saying: a shared machine telling somebody their
 // space is full is what a shared machine does, and the alternative is an
 // operator discovering it instead.
-func (d *Docker) warnAboutScratch(ctx context.Context, container string, s *broker.Session) {
+func (d *node) warnAboutScratch(ctx context.Context, container string, s *broker.Session) {
 	if !d.scratch || d.limits.ScratchBytes <= 0 {
 		return
 	}
@@ -493,7 +473,7 @@ func (d *Docker) warnAboutScratch(ctx context.Context, container string, s *brok
 
 // destroy removes a container whose grace period has run out, and the run's
 // networks once its last machine is gone.
-func (d *Docker) destroy(t target) {
+func (d *node) destroy(t target) {
 	// Deliberately not the session's context: the session is what ended.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -520,7 +500,7 @@ func (d *Docker) destroy(t target) {
 	d.removeNetworks(ctx, t.RunID)
 
 	if d.runs != nil {
-		if err := d.runs.SetHost(ctx, t.RunID, ""); err != nil {
+		if err := d.runs.ClearHost(ctx, t.RunID, d.name); err != nil {
 			d.log.Error("clear run placement", "run", t.RunID, "error", err)
 		}
 	}
@@ -534,7 +514,7 @@ func (d *Docker) destroy(t target) {
 // whatever a previous process left behind. That is the right thing rather than
 // a compromise: nothing knows whether those containers still have players
 // behind them, and rebuilding one costs a reconnection.
-func (d *Docker) Run(ctx context.Context) {
+func (d *node) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.sweep)
 	defer ticker.Stop()
 
@@ -553,7 +533,7 @@ func (d *Docker) Run(ctx context.Context) {
 
 // sweepOnce destroys every game container no session is holding, and then any
 // network left with nothing on it.
-func (d *Docker) sweepOnce(ctx context.Context) {
+func (d *node) sweepOnce(ctx context.Context) {
 	containers, err := d.api.ListContainers(ctx, "wge.run")
 	if err != nil {
 		d.log.Error("sweep containers", "error", err)
@@ -587,7 +567,7 @@ func (d *Docker) sweepOnce(ctx context.Context) {
 }
 
 // sweepNetworks removes the networks of runs that have no machines left.
-func (d *Docker) sweepNetworks(ctx context.Context, liveRuns map[int64]bool) {
+func (d *node) sweepNetworks(ctx context.Context, liveRuns map[int64]bool) {
 	networks, err := d.api.ListNetworks(ctx, "wge.run")
 	if err != nil {
 		d.log.Error("sweep networks", "error", err)
@@ -607,7 +587,7 @@ func (d *Docker) sweepNetworks(ctx context.Context, liveRuns map[int64]bool) {
 
 // removeNetworks deletes a run's private networks. Nothing may be attached to
 // a network for it to go, which is why the containers are removed first.
-func (d *Docker) removeNetworks(ctx context.Context, runID int64) {
+func (d *node) removeNetworks(ctx context.Context, runID int64) {
 	networks, err := d.api.ListNetworks(ctx, fmt.Sprintf("wge.run=%d", runID))
 	if err != nil {
 		d.log.Error("list run networks", "run", runID, "error", err)
@@ -628,13 +608,13 @@ type inspectResponse struct {
 	State containerState
 }
 
-func (d *Docker) inspectState(ctx context.Context, name string) (containerState, error) {
+func (d *node) inspectState(ctx context.Context, name string) (containerState, error) {
 	var resp inspectResponse
 	err := d.api.Get(ctx, "/containers/"+name+"/json", &resp)
 	return resp.State, err
 }
 
-func (d *Docker) create(ctx context.Context, name, image, host string, networks []string, s *broker.Session) error {
+func (d *node) create(ctx context.Context, name, image, host string, networks []string, s *broker.Session) error {
 	body := map[string]any{
 		"Image":        image,
 		"Hostname":     host,
@@ -666,7 +646,7 @@ func (d *Docker) create(ctx context.Context, name, image, host string, networks 
 
 // hostConfig is the sandbox. Every field here exists because the container is
 // hostile by design: the player is invited to attack it.
-func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
+func (d *node) hostConfig(networks []string, runID int64) map[string]any {
 	caps := d.limits.Capabilities
 	if caps == nil {
 		caps = multiUserCaps
@@ -732,8 +712,13 @@ func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 	return cfg
 }
 
+// load is how many machines this node is holding and how many it will hold.
+func (d *node) load(ctx context.Context) (held, capacity int) {
+	return len(d.reaper.heldNames()), d.capacityLimit(ctx)
+}
+
 // Runtimes returns the OCI runtimes the engine knows about.
-func (d *Docker) Runtimes(ctx context.Context) (map[string]bool, error) {
+func (d *node) Runtimes(ctx context.Context) (map[string]bool, error) {
 	var info struct {
 		Runtimes map[string]struct {
 			Path string `json:"path"`
@@ -771,7 +756,7 @@ const PreflightTimeout = 90 * time.Second
 // So it is tested, once, at startup, by doing the thing rather than reasoning
 // about it: make a setuid copy of a binary that reports its effective uid, run
 // it as somebody who is not root, and see who it says it is.
-func (d *Docker) VerifySetuid(ctx context.Context, image string) error {
+func (d *node) VerifySetuid(ctx context.Context, image string) error {
 	// Bounded, because a check that can hang forever is worse than one that
 	// fails: it takes the service down without saying why.
 	ctx, cancel := context.WithTimeout(ctx, PreflightTimeout)
@@ -832,7 +817,7 @@ func (d *Docker) VerifySetuid(ctx context.Context, image string) error {
 // never built fails at the moment a player presents a correct password, which
 // reads to them as the game being broken and to an operator as nothing at all
 // -- the server is up, it just cannot serve.
-func (d *Docker) MissingImages(ctx context.Context, images []string) ([]string, error) {
+func (d *node) MissingImages(ctx context.Context, images []string) ([]string, error) {
 	var missing []string
 
 	for _, image := range images {
@@ -860,7 +845,7 @@ func (d *Docker) MissingImages(ctx context.Context, images []string) ([]string, 
 // counts. The machines have to go immediately rather than at the end of a
 // grace period, or the player reconnects to a box still seeded with the
 // credentials they asked to be rid of.
-func (d *Docker) DestroyRun(ctx context.Context, runID int64) error {
+func (d *node) DestroyRun(ctx context.Context, runID int64) error {
 	containers, err := d.api.ListContainers(ctx, fmt.Sprintf("wge.run=%d", runID))
 	if err != nil {
 		return fmt.Errorf("list run containers: %w", err)
@@ -900,7 +885,7 @@ func (d *Docker) DestroyRun(ctx context.Context, runID int64) error {
 // Nothing calls it during play. It is what a reset is supposed to do: a run
 // that has been re-rolled is a different game, and keeping the notes from the
 // last one would be keeping the answers.
-func (d *Docker) RemoveScratch(ctx context.Context, runID int64) error {
+func (d *node) RemoveScratch(ctx context.Context, runID int64) error {
 	if err := d.api.RemoveVolume(ctx, ScratchVolume(runID)); err != nil && !docker.IsNotFound(err) {
 		return err
 	}
@@ -921,7 +906,7 @@ type execCreateResponse struct {
 	ID string `json:"Id"`
 }
 
-func (d *Docker) createExec(ctx context.Context, name string, s *broker.Session) (string, error) {
+func (d *node) createExec(ctx context.Context, name string, s *broker.Session) (string, error) {
 	cmd := []string{"login", "-f", s.Level.User}
 	if s.Command != "" {
 		// Non-interactive `ssh host <cmd>`. Run it as the level user through a
@@ -950,7 +935,7 @@ func (d *Docker) createExec(ctx context.Context, name string, s *broker.Session)
 
 // runExec starts the exec and pumps bytes between the SSH channel and the
 // container until either side closes.
-func (d *Docker) runExec(ctx context.Context, execID string, s *broker.Session) error {
+func (d *node) runExec(ctx context.Context, execID string, s *broker.Session) error {
 	conn, br, err := d.api.Hijack(ctx, "/exec/"+execID+"/start", map[string]any{
 		"Detach": false,
 		"Tty":    s.Command == "",
@@ -1053,7 +1038,7 @@ func demultiplex(r io.Reader, stdout, stderr io.Writer) error {
 	}
 }
 
-func (d *Docker) resize(ctx context.Context, execID string, w, h int) {
+func (d *node) resize(ctx context.Context, execID string, w, h int) {
 	if w <= 0 || h <= 0 {
 		return
 	}
@@ -1069,7 +1054,7 @@ type execInspectResponse struct {
 	Running  bool `json:"Running"`
 }
 
-func (d *Docker) execExitCode(ctx context.Context, execID string) (int, error) {
+func (d *node) execExitCode(ctx context.Context, execID string) (int, error) {
 	var resp execInspectResponse
 	if err := d.api.Get(ctx, "/exec/"+execID+"/json", &resp); err != nil {
 		return 0, err
@@ -1080,7 +1065,7 @@ func (d *Docker) execExitCode(ctx context.Context, execID string) (int, error) {
 	return resp.ExitCode, nil
 }
 
-func (d *Docker) remove(ctx context.Context, name string) error {
+func (d *node) remove(ctx context.Context, name string) error {
 	q := url.Values{"force": {"true"}, "v": {"false"}}
 	return d.api.Delete(ctx, "/containers/"+name+"?"+q.Encode())
 }

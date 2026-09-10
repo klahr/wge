@@ -25,6 +25,7 @@ func cmdReset(args []string) error {
 	dbPath := fs.String("db", "wge.db", "path to the engine database")
 	gamesDir := fs.String("games", "games", "directory of game definitions")
 	socket := fs.String("docker", runtime.DefaultSocket, "Docker engine socket")
+	nodes := fs.String("nodes", "", "machines the run may be on, as name=endpoint pairs (default: this one)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -32,9 +33,18 @@ func cmdReset(args []string) error {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: wge reset [-db path] [-games dir] <handle> <game>")
+		return fmt.Errorf("usage: wge reset [-db path] [-games dir] [-nodes spec] <handle> <game>")
 	}
 	handle, gameID := fs.Arg(0), fs.Arg(1)
+
+	// The same pool the front door serves. A reset that only reached this
+	// machine would re-roll the salt while a box carrying the old credentials
+	// was still up somewhere else -- two answers to the same puzzle, and the
+	// stale one still accepting logins.
+	parsed, err := parseNodes(*nodes)
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 
@@ -71,8 +81,9 @@ func cmdReset(args []string) error {
 
 	rt, err := runtime.NewDocker(runtime.Options{
 		Socket: *socket,
+		Nodes:  parsed,
 		Images: lib,
-		Seeder: build.NewSeeder(*socket),
+		Seeder: build.NewSeeder(),
 		Runs:   st,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

@@ -41,29 +41,46 @@ func IsNotFound(err error) bool {
 // Only a handful of endpoints are needed -- build, create, start, exec, upload,
 // remove -- which is a poor trade for the official SDK's dependency tree.
 type Client struct {
-	socket string
-	http   *http.Client
+	address string
+	network string
+	http    *http.Client
 }
 
-// New returns a client for the engine at socket.
-func New(socket string) *Client {
-	if socket == "" {
-		socket = DefaultSocket
+// New returns a client for the engine at endpoint.
+//
+// An endpoint is a unix socket path, a unix:// URL, or tcp://host:port. The
+// last is what makes more than one machine possible: a pool whose members are
+// all local sockets is a pool of one wearing several names.
+func New(endpoint string) *Client {
+	if endpoint == "" {
+		endpoint = DefaultSocket
 	}
+
+	network, address := "unix", endpoint
+	switch {
+	case strings.HasPrefix(endpoint, "unix://"):
+		address = strings.TrimPrefix(endpoint, "unix://")
+	case strings.HasPrefix(endpoint, "tcp://"):
+		network, address = "tcp", strings.TrimPrefix(endpoint, "tcp://")
+	case strings.HasPrefix(endpoint, "http://"):
+		network, address = "tcp", strings.TrimPrefix(endpoint, "http://")
+	}
+
 	return &Client{
-		socket: socket,
+		address: address,
+		network: network,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+					return (&net.Dialer{}).DialContext(ctx, network, address)
 				},
 			},
 		},
 	}
 }
 
-// Socket is the engine socket this client dials.
-func (d *Client) Socket() string { return d.socket }
+// Endpoint is the address this client dials: a socket path or host:port.
+func (d *Client) Endpoint() string { return d.address }
 
 func (d *Client) url(path string) string {
 	// The host is ignored -- the transport always dials the unix socket -- but
@@ -144,9 +161,9 @@ func (d *Client) Hijack(ctx context.Context, path string, body any) (net.Conn, *
 		return nil, nil, fmt.Errorf("encode request: %w", err)
 	}
 
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", d.socket)
+	conn, err := (&net.Dialer{}).DialContext(ctx, d.network, d.address)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial docker socket: %w", err)
+		return nil, nil, fmt.Errorf("dial docker engine at %s: %w", d.address, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.url(path), bytes.NewReader(encoded))

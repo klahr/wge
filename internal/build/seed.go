@@ -36,14 +36,15 @@ import (
 // anywhere a player could find it -- and the image needs no tooling of its own,
 // which is just as well, since a /usr/local/bin/wge-seed would be the loudest
 // thing on the box.
-type Seeder struct {
-	api *docker.Client
-}
+//
+// A seeder holds no engine of its own. It is handed the one the container is
+// on, which in a pool is not always the local machine -- and a seeder that
+// assumed otherwise would render a run's credentials into thin air and leave
+// the player looking at template text.
+type Seeder struct{}
 
-// NewSeeder returns a seeder talking to the engine at socket.
-func NewSeeder(socket string) *Seeder {
-	return &Seeder{api: docker.New(socket)}
-}
+// NewSeeder returns a seeder.
+func NewSeeder() *Seeder { return &Seeder{} }
 
 // RunSecrets is what a template can reach. It is the run's derived credentials
 // dressed up as template functions.
@@ -149,8 +150,8 @@ const templateMarker = "{{"
 // Seed renders a run's templates into its container and sets the account
 // passwords. It must complete before a player is attached: an unseeded
 // container has placeholder text where its credentials should be.
-func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, host string, secrets *RunSecrets) error {
-	anchor, err := AnchorOf(ctx, s.api, container)
+func (s *Seeder) Seed(ctx context.Context, api *docker.Client, container string, g *manifest.Game, host string, secrets *RunSecrets) error {
+	anchor, err := AnchorOf(ctx, api, container)
 	if err != nil {
 		return err
 	}
@@ -165,7 +166,7 @@ func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, h
 		// uploading the author's on-disk mode would silently undo whatever the
 		// level's setup.sh established -- and setup.sh is where a game's access
 		// control is expressed. Seeding replaces content, nothing else.
-		if err := s.adoptExistingMetadata(ctx, container, rendered); err != nil {
+		if err := s.adoptExistingMetadata(ctx, api, container, rendered); err != nil {
 			return err
 		}
 
@@ -173,15 +174,15 @@ func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, h
 		if err != nil {
 			return fmt.Errorf("pack rendered files: %w", err)
 		}
-		if err := s.api.PutArchive(ctx, container, "/", bytes.NewReader(archive)); err != nil {
+		if err := api.PutArchive(ctx, container, "/", bytes.NewReader(archive)); err != nil {
 			return fmt.Errorf("upload rendered files: %w", err)
 		}
 	}
 
-	if err := s.setPasswords(ctx, container, g, host, secrets); err != nil {
+	if err := s.setPasswords(ctx, api, container, g, host, secrets); err != nil {
 		return err
 	}
-	return s.restoreTimes(ctx, container, g, host, anchor, rendered)
+	return s.restoreTimes(ctx, api, container, g, host, anchor, rendered)
 }
 
 // setPasswords writes the level accounts' passwords via chpasswd on stdin.
@@ -189,7 +190,7 @@ func (s *Seeder) Seed(ctx context.Context, container string, g *manifest.Game, h
 // The passwords never touch the container's filesystem except as hashes in
 // /etc/shadow, which is where a player would expect to find them and where they
 // are of no use: the hash is yescrypt over 24 characters of derived entropy.
-func (s *Seeder) setPasswords(ctx context.Context, container string, g *manifest.Game, host string, secrets *RunSecrets) error {
+func (s *Seeder) setPasswords(ctx context.Context, api *docker.Client, container string, g *manifest.Game, host string, secrets *RunSecrets) error {
 	var lines strings.Builder
 	for _, l := range g.Levels {
 		if l.Host != host {
@@ -205,7 +206,7 @@ func (s *Seeder) setPasswords(ctx context.Context, container string, g *manifest
 		return nil
 	}
 
-	res, err := s.api.Exec(ctx, container, docker.ExecOptions{
+	res, err := api.Exec(ctx, container, docker.ExecOptions{
 		Cmd:   []string{"chpasswd"},
 		User:  "root",
 		Stdin: strings.NewReader(lines.String()),
@@ -229,7 +230,7 @@ func (s *Seeder) setPasswords(ctx context.Context, container string, g *manifest
 // moment this player's container was created, which is a fact about the game
 // engine rather than about the box.
 func (s *Seeder) restoreTimes(
-	ctx context.Context, container string, g *manifest.Game, host string,
+	ctx context.Context, api *docker.Client, container string, g *manifest.Game, host string,
 	anchor time.Time, rendered []entry,
 ) error {
 	plan, err := Assemble(g, host, anchor)
@@ -310,7 +311,7 @@ rm -f "$planned" "$newer"
 		}
 	}
 
-	res, err := s.api.Exec(ctx, container, docker.ExecOptions{
+	res, err := api.Exec(ctx, container, docker.ExecOptions{
 		Cmd:   []string{"sh", "-c", script.String()},
 		User:  "root",
 		Stdin: strings.NewReader(planned.String()),
@@ -331,13 +332,13 @@ rm -f "$planned" "$newer"
 // carries the permissions the image intends. Anything the seeder cannot stat is
 // left with the values from the plan, which is the right fallback for a file the
 // build did not manage to place.
-func (s *Seeder) adoptExistingMetadata(ctx context.Context, container string, entries []entry) error {
+func (s *Seeder) adoptExistingMetadata(ctx context.Context, api *docker.Client, container string, entries []entry) error {
 	paths := make([]string, 0, len(entries))
 	for _, e := range entries {
 		paths = append(paths, e.Path)
 	}
 
-	res, err := s.api.Exec(ctx, container, docker.ExecOptions{
+	res, err := api.Exec(ctx, container, docker.ExecOptions{
 		Cmd: []string{"sh", "-c",
 			`while IFS= read -r p; do stat -c '%a %u %g %n' -- "$p" 2>/dev/null || true; done`},
 		User:  "root",

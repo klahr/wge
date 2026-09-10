@@ -33,6 +33,7 @@ func cmdServe(args []string) error {
 	grace := fs.Duration("grace", runtime.DefaultGrace, "how long a container outlives its last session")
 	sweep := fs.Duration("sweep", runtime.DefaultSweep, "how often abandoned containers are collected")
 	node := fs.String("node", "", "name of this machine in the runs table (default: hostname)")
+	nodes := fs.String("nodes", "", "machines to run containers on, as name=endpoint pairs (default: this one)")
 	noScratch := fs.Bool("no-scratch", false, "do not give runs a persistent scratch volume")
 	maxMachines := fs.Int("max-machines", 0, "most containers to run at once (default: derived from the engine's memory)")
 	containerRuntime := fs.String("container-runtime", "", "OCI runtime for game containers, e.g. runsc (default: the engine's own)")
@@ -80,15 +81,21 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	parsed, err := parseNodes(*nodes)
+	if err != nil {
+		return err
+	}
+
 	rt, err := runtime.NewDocker(runtime.Options{
 		Socket:           *socket,
 		Images:           lib,
-		Seeder:           build.NewSeeder(*socket),
+		Seeder:           build.NewSeeder(),
 		Runs:             st,
 		Node:             *node,
 		NoScratch:        *noScratch,
 		MaxMachines:      *maxMachines,
 		ContainerRuntime: *containerRuntime,
+		Nodes:            parsed,
 		Limits:           limitsFrom(*storageSize, *scratchSize, *minFree),
 		Grace:            *grace,
 		Sweep:            *sweep,
@@ -137,7 +144,8 @@ func cmdServe(args []string) error {
 	log.Info("broker listening", "addr", bound.String(),
 		"fingerprint", ssh.FingerprintSHA256(hostKey.PublicKey()),
 		"enrollment", enrollmentMode(*open),
-		"container-runtime", runtimeName(*containerRuntime))
+		"container-runtime", runtimeName(*containerRuntime),
+		"machines", strings.Join(rt.Names(), ","))
 
 	return srv.Serve(ctx)
 }
@@ -293,6 +301,38 @@ A per-container size limit needs a storage driver that enforces one: overlay2
 on XFS with pquota, or btrfs. Leave -storage-size unset to run without it --
 the host is still protected by -min-free, which stops new runs before the disk
 fills`, err)
+}
+
+// parseNodes reads the machines a pool is made of.
+//
+//	-nodes "relay=tcp://10.0.0.11:2375,vault=tcp://10.0.0.12:2375"
+//
+// A name is what a run's placement is recorded as, so it has to outlive a
+// restart and mean the same machine afterwards: change the endpoint and the
+// runs follow it, change the name and they do not.
+func parseNodes(spec string) ([]runtime.Node, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+
+	var out []runtime.Node
+	for _, pair := range strings.Split(spec, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		name, endpoint, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("node %q is not name=endpoint", pair)
+		}
+		name, endpoint = strings.TrimSpace(name), strings.TrimSpace(endpoint)
+		if name == "" || endpoint == "" {
+			return nil, fmt.Errorf("node %q is not name=endpoint", pair)
+		}
+		out = append(out, runtime.Node{Name: name, Socket: endpoint})
+	}
+	return out, nil
 }
 
 func enrollmentMode(open bool) string {
