@@ -31,6 +31,7 @@ func cmdServe(args []string) error {
 	sweep := fs.Duration("sweep", runtime.DefaultSweep, "how often abandoned containers are collected")
 	node := fs.String("node", "", "name of this machine in the runs table (default: hostname)")
 	noScratch := fs.Bool("no-scratch", false, "do not give runs a persistent scratch volume")
+	maxMachines := fs.Int("max-machines", 0, "most containers to run at once (default: derived from the engine's memory)")
 	hostKeyPath := fs.String("host-key", "host_key", "SSH host key; generated if absent")
 	socket := fs.String("docker", runtime.DefaultSocket, "Docker engine socket")
 	verbose := fs.Bool("v", false, "log at debug level")
@@ -67,15 +68,16 @@ func cmdServe(args []string) error {
 	}
 
 	rt, err := runtime.NewDocker(runtime.Options{
-		Socket:    *socket,
-		Images:    lib,
-		Seeder:    build.NewSeeder(*socket),
-		Runs:      st,
-		Node:      *node,
-		NoScratch: *noScratch,
-		Grace:     *grace,
-		Sweep:     *sweep,
-		Logger:    log,
+		Socket:      *socket,
+		Images:      lib,
+		Seeder:      build.NewSeeder(*socket),
+		Runs:        st,
+		Node:        *node,
+		NoScratch:   *noScratch,
+		MaxMachines: *maxMachines,
+		Grace:       *grace,
+		Sweep:       *sweep,
+		Logger:      log,
 	})
 	if err != nil {
 		return err

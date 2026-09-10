@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,6 +29,7 @@ type fakeRuntime struct {
 	lastSize  WindowSize
 	lastCmd   string
 	destroyed []int64
+	refuse    error
 }
 
 // DestroyRun makes the fake a Resetter.
@@ -46,6 +48,11 @@ func (f *fakeRuntime) destroyedRuns() []int64 {
 
 func (f *fakeRuntime) Attach(_ context.Context, s *Session) (int, error) {
 	f.mu.Lock()
+	if f.refuse != nil {
+		err := f.refuse
+		f.mu.Unlock()
+		return 0, err
+	}
 	f.attached = append(f.attached, s.Level.ID)
 	f.lastTerm = s.Term
 	f.lastSize = WindowSize{Width: s.Width, Height: s.Height}
@@ -707,5 +714,51 @@ func TestEnrollmentWithoutTheWordDoesNotReset(t *testing.T) {
 	progress, _ := h.store.Progress(ctx, run.ID)
 	if len(progress) != 1 {
 		t.Fatalf("progress was disturbed: %v", progress)
+	}
+}
+
+// A player turned away with nothing to go on cannot tell a full host from a
+// game they have broken, and will spend the evening looking for the mistake
+// they did not make.
+func TestCapacityRefusalSaysSo(t *testing.T) {
+	h := newHarness(t)
+	key := newSigner(t)
+	password := h.enroll(t, key, "rook")
+
+	h.runtime.mu.Lock()
+	h.runtime.refuse = fmt.Errorf("no room: %w", ErrAtCapacity)
+	h.runtime.mu.Unlock()
+
+	client, err := h.dial(t, key, ssh.Password(password))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	var out strings.Builder
+	sess.Stdout = &out
+	sess.Stderr = &out
+	runErr := sess.Run("")
+
+	if !strings.Contains(out.String(), "at capacity") {
+		t.Fatalf("the player was not told why; output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "untouched") {
+		t.Errorf("the player was not reassured their game survives:\n%s", out.String())
+	}
+
+	// EX_TEMPFAIL, so anything scripted can tell a wait from a failure.
+	var exit *ssh.ExitError
+	if !errors.As(runErr, &exit) {
+		t.Fatalf("session ended with %v, want an exit status", runErr)
+	}
+	if exit.ExitStatus() != exitTempFail {
+		t.Errorf("exit status = %d, want %d (EX_TEMPFAIL)", exit.ExitStatus(), exitTempFail)
 	}
 }

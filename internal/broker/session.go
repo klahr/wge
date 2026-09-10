@@ -36,6 +36,11 @@ type exitStatus struct {
 	Code uint32
 }
 
+// exitTempFail is sysexits' EX_TEMPFAIL: the request was refused for a reason
+// that will pass. Anything driving the engine over ssh can tell it apart from
+// a real failure and come back later.
+const exitTempFail = 75
+
 // serveSession drives one session channel: the SSH request dance, then either
 // the enrollment dialog or an attachment to the player's level.
 func (s *Server) serveSession(ctx context.Context, o *outcome, ch ssh.Channel, reqs <-chan *ssh.Request) {
@@ -150,7 +155,20 @@ func (s *Server) finish(ctx context.Context, o *outcome, sess *Session, ch ssh.C
 	}
 
 	code, err := s.cfg.Runtime.Attach(ctx, sess)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrAtCapacity):
+		// Worth saying plainly. A player turned away with nothing to go on
+		// cannot tell a full host from a game they have broken, and will spend
+		// the evening looking for the mistake they did not make.
+		s.log.Warn("refused at capacity",
+			"handle", o.handle(), "game", o.gameID, "level", level.ID, "error", err)
+		fmt.Fprintf(sess.Stderr,
+			"This host is at capacity. Your game is untouched -- try again in a\r\n"+
+				"few minutes.\r\n")
+		sendExit(ch, exitTempFail)
+		return
+
+	case err != nil:
 		s.log.Error("attach", "handle", o.handle(), "level", level.ID, "error", err)
 		fmt.Fprintf(sess.Stderr, "could not reach the host, try again shortly\r\n")
 		sendExit(ch, 255)

@@ -350,6 +350,33 @@ player with a game whose answers depend on which of the two they reached. And
 a reset takes the scratch volume that a reap deliberately keeps, because notes
 written against the old credentials are the old answers.
 
+## Admission control
+
+A node refuses work it cannot do rather than accepting everything and serving
+everybody badly. Capacity is counted in **machines**, not players, because a
+run spanning two hosts costs twice as much to serve, and admission is
+all-or-nothing: half a run leaves the player on a box whose peer will never
+come up, which is a worse failure than being turned away.
+
+The default is derived from the memory the engine reports, keeping a quarter
+back for the daemon, the engine and the page cache every container reads its
+image through. `-max-machines` overrides it.
+
+Two policies worth stating. A player whose machines are already up is never
+refused — they are already resident and already counted, and turning them away
+frees nothing. And a machine inside its grace period still counts, because it
+is still running.
+
+A refused player is told so, and told their game is untouched. Somebody turned
+away with nothing to go on cannot tell a full host from a game they have
+broken, and will spend the evening looking for the mistake they did not make.
+The session exits `75` (`EX_TEMPFAIL`) so anything scripted can tell a wait
+from a failure.
+
+Reservation is the same mechanism as reaping: admission takes the reaper's
+hold on every machine the run needs, under the lock the count was taken under,
+so two connections arriving together cannot both be told there is room for one.
+
 ## Container lifecycle
 
 Containers are created when a player connects and destroyed when they stop
@@ -460,22 +487,33 @@ Built and tested:
 | `internal/build` | the image pipeline, the aging pass, seeding, and verification |
 | `internal/docker` | a small Engine API client |
 
-The example game is playable end to end: four levels, a DAG whose final level
-is gated on a split credential — an encrypted SSH key recovered from a staged
-backup on one level, its passphrase found on another.
+Both games are playable end to end. `heist` finishes with a real pivot: an
+encrypted SSH key recovered from a staged backup on one machine, its passphrase
+found on another level, and an `ssh` across a private network to a document
+store the front door will not attach anybody to.
 
 Next, roughly in order:
 
 1. **Credentials inside archives.** `placed_in` accepts an archive member, but
    rendering into one means repacking it during seeding. Until it does, the
    validator rejects the syntax rather than producing a game whose credential
-   never appears.
-2. **Session recording and the hint engine.** The broker proxies every byte, so
-   it already knows whether a player is circling or stalled — no in-container
-   agent to find or tamper with. Hints arrive as mail from an in-fiction
-   correspondent, escalating in tiers, and unprompted when a player stalls.
-3. **Scratch persistence.** A reap currently loses whatever the player wrote. A
-   small per-run volume mounted somewhere they keep notes would cost little and
-   remove the one real sting.
-5. **Admission control.** Nothing yet refuses a connection when a machine is
-   full; the resource caps are per container, not per host.
+   never appears — a tarball of somebody's home directory is better fiction
+   than the extracted copy standing in for it.
+2. **A quota on the scratch volumes.** Admission control caps how many machines
+   a node runs, but nothing caps what a player writes. A disk quota on the
+   backing filesystem is the only control there is today, and the same is true
+   of each container's writable layer.
+3. **The dead login databases.** The aging pass writes `wtmpdb` and `lastlog2`
+   SQLite databases, but purging systemd from the base took the commands that
+   read them, so on this base they are generated and never looked at. The
+   binary `wtmp` and `lastlog` are the live ones. Either reinstate the tools or
+   stop writing the databases.
+4. **gVisor or Kata.** The design called for a sandboxed runtime and it was
+   never done. It costs syscall performance nobody will notice on a box where
+   people run `grep`, and it turns container escape from one kernel bug away
+   into a genuinely hard problem — which matters on a machine whose whole
+   purpose is to invite strangers to attack it.
+5. **More than one node.** A run is a pure function of its salt and
+   `runs.current_host` already pins it to a machine, so the scheduling is
+   mostly there; what is missing is anything that routes a player to a second
+   node, and the scratch volume is the one thing that does not travel.

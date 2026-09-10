@@ -35,6 +35,12 @@ type Games interface {
 	All() []*manifest.Game
 }
 
+// ErrAtCapacity is returned by a Runtime that has no room to build a run's
+// machines. It is part of the interface contract rather than a runtime detail,
+// because the broker has to tell the player something true about it: a refusal
+// they cannot distinguish from a broken game is worse than a wait.
+var ErrAtCapacity = errors.New("host is at capacity")
+
 // Runtime attaches a player to the container for their level, creating it if
 // necessary. Implementations own container lifecycle; the broker only ever
 // asks for a level and a pair of streams.

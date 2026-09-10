@@ -134,6 +134,13 @@ type Docker struct {
 	sweep   time.Duration
 	scratch bool
 
+	// Admission. The lock covers counting and reserving together, so two
+	// connections arriving at once cannot both be told there is room for one.
+	admitMu      sync.Mutex
+	maxMachines  int
+	capacity     int
+	capacityOnce sync.Once
+
 	// authOffsets records how far each machine's auth log had got when it
 	// finished booting, so that live sessions can be told from the history the
 	// aging pass wrote.
@@ -153,6 +160,9 @@ type Options struct {
 	Runs Runs
 	// Node names this machine. Defaults to the system hostname.
 	Node string
+	// MaxMachines caps how many containers this node will run at once. Zero
+	// derives it from the memory the engine reports.
+	MaxMachines int
 	// NoScratch turns off the persistent scratch volume. Without it a reap
 	// takes the player's own files with it; with it, disk is consumed per run
 	// and is not quota'd.
@@ -198,15 +208,16 @@ func NewDocker(opts Options) (*Docker, error) {
 	}
 
 	d := &Docker{
-		api:     docker.New(opts.Socket),
-		log:     opts.Logger,
-		images:  opts.Images,
-		seeder:  opts.Seeder,
-		runs:    opts.Runs,
-		limits:  opts.Limits,
-		node:    opts.Node,
-		sweep:   opts.Sweep,
-		scratch: !opts.NoScratch,
+		api:         docker.New(opts.Socket),
+		log:         opts.Logger,
+		images:      opts.Images,
+		seeder:      opts.Seeder,
+		runs:        opts.Runs,
+		limits:      opts.Limits,
+		node:        opts.Node,
+		sweep:       opts.Sweep,
+		scratch:     !opts.NoScratch,
+		maxMachines: opts.MaxMachines,
 	}
 	d.reaper = newReaper(opts.Grace, d.destroy)
 	return d, nil
@@ -246,11 +257,14 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 	// on. Pivoting needs the peers to be up, and a peer nothing is holding
 	// would be taken by the next sweep while the player was still on the first
 	// box looking for the way across.
-	var held []target
+	held := make([]target, 0, len(plan.hosts))
 	for _, host := range plan.hosts {
-		t := target{Name: ContainerName(s.Run.ID, host), RunID: s.Run.ID}
-		d.reaper.hold(t)
-		held = append(held, t)
+		held = append(held, target{Name: ContainerName(s.Run.ID, host), RunID: s.Run.ID})
+	}
+
+	// Reserving is what admission does, so nothing is held if it refuses.
+	if err := d.admit(ctx, held); err != nil {
+		return 0, err
 	}
 	defer func() {
 		// Before letting go: read back which levels the player reached from
