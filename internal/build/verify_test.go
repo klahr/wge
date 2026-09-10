@@ -59,7 +59,11 @@ func writeGame(t *testing.T, id string, setup map[string]string) string {
 version: 1
 title: Verification Fixture
 base: %s
-noise_users: 2
+staff:
+  - user: rhelin
+    name: Reeta Helin
+  - user: kmakela
+    name: Kalle Makela
 timeline:
   start: 2024-11-03T09:00:00Z
 `, id, verifyBase))

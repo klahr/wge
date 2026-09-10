@@ -54,14 +54,14 @@ Games live one to a directory under `games/`. There are two:
 
 | | |
 |---|---|
-| `games/demo` | **Late Return** — three levels, one machine, nothing clever. The smallest game the engine will run, and the one to copy. |
+| `games/demo` | **Late Return** — three levels, one machine, nothing clever. The smallest game the engine will run, and the one to copy. Its last level is about one of its own staff accounts. |
 | `games/heist` | **The Mailroom Job** — four levels, a DAG whose last level is gated on a split credential, two machines, a service and cron. |
 
 A game is a directory:
 
 ```
 games/heist/
-  game.yaml              # image, packages, fictional timeline, noise users
+  game.yaml              # image, packages, fictional timeline, staff
   levels/
     01-mailroom/
       level.yaml         # user, prerequisites, the credential it grants
@@ -70,6 +70,25 @@ games/heist/
       mail/              # messages delivered to the level user's mailbox
       setup.sh           # permissions, services, cron
 ```
+
+A game names its own cast. The engine invents no names: a Finnish library and
+a Swedish freight company do not employ the same people, and an account whose
+name the engine chose would belong to somebody else's story.
+
+```yaml
+staff:                      # the people who work here and are not the game
+  - user: tkoivisto
+    name: Tuomas Koivisto
+  - user: mvirta
+    name: Marja Virta
+    role: admin             # flavours their generated shell history and mail
+```
+
+Staff are not decoration. A machine with a home directory for every level and
+nobody else has written out its own structure, so the validator refuses a game
+with none. They can be pinned to one machine with `host:`, or left to work for
+the whole company. Level accounts carry a `name:` in the same way, and a name
+is optional — a real machine has accounts with an empty gecos field too.
 
 Levels declare the services and scheduled work that belong to them:
 

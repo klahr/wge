@@ -16,6 +16,8 @@ type account struct {
 	Home     string
 	Shell    string
 	Gecos    string
+	// Role is what the manifest asked for, if it asked for anything.
+	Role Role
 
 	// Level is set for the accounts that are levels; the rest are decoys and
 	// service accounts.
@@ -35,30 +37,6 @@ const (
 	RoleAdmin  Role = "admin"
 	RolePlain  Role = "plain"
 )
-
-// noiseNames is the pool decoy accounts are drawn from.
-//
-// Decoys are not decoration. A box whose /home holds exactly as many
-// directories as the game has levels has handed over its own structure; the
-// first thing a player does is `ls /home`, and it should not be a table of
-// contents.
-var noiseNames = []struct {
-	User, Gecos string
-	Role        Role
-}{
-	{"aringdal", "Astrid Ringdal", RolePlain},
-	{"pkoskela", "Petri Koskela", RoleOps},
-	{"mhalvorsen", "Mette Halvorsen", RolePlain},
-	{"tsaarinen", "Tuomas Saarinen", RoleBackup},
-	{"lbergqvist", "Lova Bergqvist", RolePlain},
-	{"hnyberg", "Henrik Nyberg", RoleOps},
-	{"iolsen", "Ingrid Olsen", RolePlain},
-	{"vlindqvist", "Viktor Lindqvist", RoleAdmin},
-	{"skallio", "Sanna Kallio", RolePlain},
-	{"ejakobsen", "Erik Jakobsen", RoleBackup},
-	{"nfredriksen", "Nora Fredriksen", RolePlain},
-	{"ostrand", "Olle Strand", RoleOps},
-}
 
 // planAccounts decides every account on one machine: the levels that live
 // here, the services they declare, and the decoys.
@@ -92,7 +70,8 @@ func planAccounts(g *manifest.Game, host string) ([]*account, error) {
 			User: l.User, UID: uid, GID: uid,
 			Home:  "/home/" + l.User,
 			Shell: "/bin/bash",
-			Gecos: gecosFor(l.User),
+			Gecos: l.Name,
+			Role:  Role(l.Role),
 			Level: l,
 		})
 	}
@@ -120,35 +99,41 @@ func planAccounts(g *manifest.Game, host string) ([]*account, error) {
 		}
 	}
 
-	for i := 0; i < g.NoiseUsers && i < len(noiseNames); i++ {
-		n := noiseNames[i]
-		if taken[n.User] {
+	for _, st := range g.Staff {
+		if taken[st.User] {
 			continue
 		}
-		taken[n.User] = true
+		// Staff can be pinned to one machine; by default they work for the
+		// whole company and have an account on all of them.
+		if st.Host != "" && st.Host != host {
+			continue
+		}
+		taken[st.User] = true
 
-		uid := uids.assign(n.User, 1000)
+		uid := uids.assign(st.User, 1000)
 		accounts = append(accounts, &account{
-			User: n.User, UID: uid, GID: uid,
-			Home:  "/home/" + n.User,
+			User: st.User, UID: uid, GID: uid,
+			Home:  "/home/" + st.User,
 			Shell: "/bin/bash",
-			Gecos: n.Gecos,
+			Gecos: st.Name,
+			Role:  Role(st.Role),
 			Noise: true,
 		})
-	}
-
-	if g.NoiseUsers > len(noiseNames) {
-		return nil, fmt.Errorf("noise_users is %d but only %d decoy identities are available",
-			g.NoiseUsers, len(noiseNames))
 	}
 
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].UID < accounts[j].UID })
 	return accounts, nil
 }
 
-// role guesses what an account does, so its generated history and mail match
-// the job. Level accounts take their cue from the services they run.
+// role is what an account does, which decides the flavour of the shell history
+// and mail generated for it.
+//
+// The manifest has the last word. Where it says nothing, a level takes its cue
+// from what it runs, because that is a better guess than none.
 func (a *account) role() Role {
+	if a.Role != "" {
+		return a.Role
+	}
 	if a.Service {
 		return RolePlain
 	}
@@ -162,11 +147,6 @@ func (a *account) role() Role {
 			}
 		}
 		return RolePlain
-	}
-	for _, n := range noiseNames {
-		if n.User == a.User {
-			return n.Role
-		}
 	}
 	return RolePlain
 }
@@ -192,27 +172,4 @@ func (p *uidPool) assign(user string, base int) int {
 	}
 	p.used[uid] = true
 	return uid
-}
-
-// gecosFor invents a full name for a level account from its username, so the
-// passwd file reads like a company's rather than a puzzle's.
-func gecosFor(user string) string {
-	for _, n := range noiseNames {
-		if n.User == user {
-			return n.Gecos
-		}
-	}
-	if name, ok := levelGecos[user]; ok {
-		return name
-	}
-	return ""
-}
-
-// levelGecos names the accounts the example game uses. Authors can override any
-// of this from a level's setup.sh.
-var levelGecos = map[string]string{
-	"jposti":     "Janne Posti",
-	"bkup":       "Backup operator",
-	"oncall":     "Operations on-call",
-	"dsundqvist": "Daniel Sundqvist",
 }

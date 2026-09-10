@@ -37,7 +37,24 @@ timeline:
   # they would all land months after the newest file on a carefully aged box.
   span: 120d
 
-# Decoy accounts with their own mail, history and abandoned scripts. Four
-# levels and exactly four home directories would hand over the shape of the
-# game to anyone who runs ls /home.
-noise_users: 7
+# The rest of the company. They have nothing to do with the job: they are here
+# because four levels and exactly four home directories would hand over the
+# shape of the game to anyone who runs ls /home.
+staff:
+  - user: aringdal
+    name: Astrid Ringdal
+  - user: pkoskela
+    name: Petri Koskela
+    role: ops
+  - user: mhalvorsen
+    name: Mette Halvorsen
+  - user: lbergqvist
+    name: Lova Bergqvist
+  - user: hnyberg
+    name: Henrik Nyberg
+    role: ops
+  - user: iolsen
+    name: Ingrid Olsen
+  - user: vlindqvist
+    name: Viktor Lindqvist
+    role: admin

@@ -56,10 +56,19 @@ type Game struct {
 
 	Timeline Timeline `yaml:"timeline"`
 
-	// NoiseUsers are decoy accounts with their own mail, history and abandoned
-	// files. Without them /home is a table of contents: as many home
-	// directories as levels tells a player the whole shape of the game.
-	NoiseUsers int `yaml:"noise_users"`
+	// Staff are the accounts that belong to the machine's fiction rather than
+	// to the game: people who work here and have nothing to do with the
+	// puzzle. They get their own mail, shell history and abandoned files.
+	//
+	// They are not optional decoration. Without them /home is a table of
+	// contents -- as many home directories as the game has levels tells a
+	// player its whole shape before they have read a file.
+	//
+	// The engine invents no names. A machine's cast belongs to whoever wrote
+	// the game: a Finnish library and a Swedish freight company do not employ
+	// the same people, and a name the engine chose would be wrong in one of
+	// them.
+	Staff []*Staff `yaml:"staff"`
 
 	// Hosts is the set of machines a run spans. Single-host games may omit it
 	// entirely and every level lands on an implicit default host.
@@ -140,6 +149,25 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 // to the build.
 func (t Timeline) Anchored() bool { return !t.Start.IsZero() }
 
+// Staff is one account that is nobody in particular.
+type Staff struct {
+	User string `yaml:"user"`
+	// Name is what /etc/passwd reports for the account. Optional: a real
+	// machine has accounts with no name on it too.
+	Name string `yaml:"name"`
+	// Role flavours the shell history and mail generated for the account.
+	// Empty means an ordinary user.
+	Role string `yaml:"role"`
+	// Host limits the account to one machine. Empty puts them on all of them,
+	// which is what a company's staff list looks like.
+	Host string `yaml:"host"`
+}
+
+// Roles are the flavours generated content can be given.
+var Roles = map[string]bool{
+	"": true, "plain": true, "mail": true, "backup": true, "ops": true, "admin": true,
+}
+
 // Host is one machine in a run. A run of a multi-host game is a set of
 // containers on private networks, with no route off the run at all.
 type Host struct {
@@ -181,6 +209,13 @@ const DefaultHostID = "main"
 type Level struct {
 	ID   string `yaml:"id"`
 	User string `yaml:"user"`
+	// Name is what /etc/passwd reports for the level's account. The engine
+	// does not invent one; an account with no name is a plausible account, and
+	// a name the engine chose would belong to somebody else's story.
+	Name string `yaml:"name"`
+	// Role flavours the shell history generated for the account when the level
+	// does not supply its own.
+	Role string `yaml:"role"`
 	Host string `yaml:"host"`
 
 	// Requires lists the levels whose credentials open this one. Empty marks

@@ -89,7 +89,7 @@ func cmdValidate(args []string) error {
 	fmt.Printf("%s v%d -- %s\n", g.ID, g.Version, g.Title)
 	fmt.Printf("  %d levels across %d host(s), entry level %s\n",
 		len(g.Levels), len(g.HostIDs()), entry.ID)
-	fmt.Printf("  %d noise users\n", g.NoiseUsers)
+	fmt.Printf("  %d staff accounts\n", len(g.Staff))
 	fmt.Println("ok")
 	return nil
 }

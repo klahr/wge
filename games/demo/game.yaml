@@ -22,6 +22,17 @@ timeline:
   # anything on the machine is alive.
   span: 60d
 
-# Four accounts that are nobody in particular. Without them the three home
-# directories under /home would be the whole game, written out.
-noise_users: 4
+# The people who work here. Nobody in particular, except that the game is
+# about one of them -- which is only possible because a game names its own
+# cast rather than taking whatever the engine had lying around.
+staff:
+  - user: tkoivisto
+    name: Tuomas Koivisto
+  - user: mvirta
+    name: Marja Virta
+    role: admin
+  - user: jlehtonen
+    name: Joonas Lehtonen
+  - user: svanhanen
+    name: Sanni Vanhanen
+    role: ops

@@ -1,5 +1,7 @@
 id: assistant
 user: hleino
+name: Hanna Leino
+role: plain
 host: libsrv
 requires: [kiosk]
 

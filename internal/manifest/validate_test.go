@@ -16,6 +16,10 @@ func valid() *Game {
 		Title:    "The Mailroom Job",
 		Base:     "wge/debian-13",
 		Timeline: Timeline{Start: time.Date(2024, 11, 3, 9, 0, 0, 0, time.UTC)},
+		Staff: []*Staff{
+			{User: "aringdal", Name: "Astrid Ringdal"},
+			{User: "pkoskela", Name: "Petri Koskela", Role: "ops"},
+		},
 		Levels: []*Level{
 			{
 				ID: "mailroom", User: "jposti", Host: DefaultHostID,
@@ -409,5 +413,79 @@ func TestDurationAcceptsDays(t *testing.T) {
 	_ = yaml.Unmarshal([]byte("nonsense"), &node)
 	if err := d.UnmarshalYAML(node.Content[0]); err == nil {
 		t.Error("expected a parse error for nonsense")
+	}
+}
+
+// A machine with a home directory for every level and nobody else has written
+// out its own structure.
+func TestStaffAreRequired(t *testing.T) {
+	g := valid()
+	g.Staff = nil
+	mustFail(t, g, "no staff")
+}
+
+// The name lands in the fifth colon-delimited field of /etc/passwd. A colon in
+// it shifts every field after it; a newline splits the line in two.
+func TestNamesCannotCorruptThePasswdFile(t *testing.T) {
+	g := valid()
+	g.Staff[0].Name = "Astrid Ringdal:/bin/sh"
+	mustFail(t, g, "would corrupt /etc/passwd")
+
+	g = valid()
+	g.Levels[0].Name = "Janne\nPosti"
+	mustFail(t, g, "would corrupt /etc/passwd")
+}
+
+// A decoy sharing an account with a level is not a decoy: it would put
+// generated history and mail into a level's own home directory.
+func TestStaffCannotShareALevelAccount(t *testing.T) {
+	g := valid()
+	g.Staff = append(g.Staff, &Staff{User: "jposti", Name: "Somebody Else"})
+	mustFail(t, g, "is also level mailroom's account")
+
+	g = valid()
+	g.Levels[1].Services = []Service{{Name: "agent", User: "agentd", Exec: "/usr/local/bin/agent"}}
+	g.Staff = append(g.Staff, &Staff{User: "agentd", Name: "Not A Person"})
+	mustFail(t, g, "is also a service account")
+}
+
+func TestStaffMustBeDistinctAndValid(t *testing.T) {
+	g := valid()
+	g.Staff = append(g.Staff, &Staff{User: "aringdal", Name: "Astrid Again"})
+	mustFail(t, g, "declared twice")
+
+	g = valid()
+	g.Staff[0].User = "Astrid Ringdal"
+	mustFail(t, g, "not a valid Unix username")
+
+	g = valid()
+	g.Staff[0].Role = "wizard"
+	mustFail(t, g, `unknown role "wizard"`)
+}
+
+// Staff can be pinned to one machine, and the machine has to exist.
+func TestStaffHostMustExist(t *testing.T) {
+	g := valid()
+	g.Hosts = []*Host{{ID: "relay", Base: "wge/debian-13"}}
+	for _, l := range g.Levels {
+		l.Host = "relay"
+	}
+	g.Staff[0].Host = "nowhere"
+	mustFail(t, g, `unknown host "nowhere"`)
+
+	g.Staff[0].Host = "relay"
+	if err := g.Validate(); err != nil {
+		t.Fatalf("a staff account pinned to a real host should validate: %v", err)
+	}
+}
+
+// A name is optional. A real machine carries accounts with nothing in the
+// gecos field, and the engine must not invent one to fill the gap.
+func TestNamesAreOptional(t *testing.T) {
+	g := valid()
+	g.Staff[0].Name = ""
+	g.Levels[0].Name = ""
+	if err := g.Validate(); err != nil {
+		t.Fatalf("nameless accounts should validate: %v", err)
 	}
 }

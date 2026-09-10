@@ -3,6 +3,7 @@ package manifest
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -42,6 +43,8 @@ func (g *Game) Validate() error {
 	errs = append(errs, g.validateGraph()...)
 	errs = append(errs, g.validateServices()...)
 	errs = append(errs, g.validateCron()...)
+	errs = append(errs, g.validateStaff()...)
+	errs = append(errs, g.validateAccountNames()...)
 
 	if len(errs) == 0 {
 		return nil
@@ -63,8 +66,9 @@ func (g *Game) validateMeta() Errors {
 	if len(g.Hosts) == 0 && strings.TrimSpace(g.Base) == "" {
 		errs = append(errs, fmt.Errorf("game must set base, or declare hosts that do"))
 	}
-	if g.NoiseUsers < 0 {
-		errs = append(errs, fmt.Errorf("noise_users cannot be negative"))
+	if len(g.Staff) == 0 {
+		errs = append(errs, fmt.Errorf(
+			"no staff: with a home directory for every level and nobody else, /home is the game's structure written out"))
 	}
 	if g.Timeline.Span.Duration() < 0 {
 		errs = append(errs, fmt.Errorf("timeline.span cannot be negative"))
@@ -600,4 +604,82 @@ func (g *Game) validateEntryIsReachable() Errors {
 			entry.ID, entry.Host)}
 	}
 	return nil
+}
+
+// gecosInvalid matches the characters that cannot appear in a passwd entry.
+//
+// The name lands in the fifth colon-delimited field of /etc/passwd. A colon in
+// it would shift every field after it, and a newline would split the line in
+// two -- either of which corrupts the account database for every account below.
+var gecosInvalid = regexp.MustCompile(`[:\n\r]`)
+
+// validateStaff checks the accounts that are nobody in particular.
+func (g *Game) validateStaff() Errors {
+	var errs Errors
+
+	levelUsers := map[string]string{}
+	for _, l := range g.Levels {
+		levelUsers[l.User] = l.ID
+	}
+	serviceUsers := map[string]bool{}
+	for _, l := range g.Levels {
+		for _, s := range l.Services {
+			serviceUsers[s.User] = true
+		}
+	}
+	hosts := map[string]bool{}
+	for _, id := range g.HostIDs() {
+		hosts[id] = true
+	}
+
+	seen := map[string]bool{}
+	for i, st := range g.Staff {
+		where := fmt.Sprintf("staff %d", i)
+		if st.User != "" {
+			where = fmt.Sprintf("staff %q", st.User)
+		}
+
+		if !userPattern.MatchString(st.User) || len(st.User) > 32 {
+			errs = append(errs, fmt.Errorf("%s: %q is not a valid Unix username", where, st.User))
+		}
+		if seen[st.User] {
+			errs = append(errs, fmt.Errorf("%s is declared twice", where))
+		}
+		seen[st.User] = true
+
+		// A decoy sharing an account with a level is not a decoy: it would put
+		// generated history and mail into a level's own home directory.
+		if level, ok := levelUsers[st.User]; ok {
+			errs = append(errs, fmt.Errorf("%s is also level %s's account", where, level))
+		}
+		if serviceUsers[st.User] {
+			errs = append(errs, fmt.Errorf("%s is also a service account", where))
+		}
+
+		if gecosInvalid.MatchString(st.Name) {
+			errs = append(errs, fmt.Errorf("%s: name %q cannot contain a colon or a newline; it would corrupt /etc/passwd", where, st.Name))
+		}
+		if !Roles[st.Role] {
+			errs = append(errs, fmt.Errorf("%s: unknown role %q", where, st.Role))
+		}
+		if st.Host != "" && !hosts[st.Host] {
+			errs = append(errs, fmt.Errorf("%s: unknown host %q", where, st.Host))
+		}
+	}
+	return errs
+}
+
+// validateAccountNames checks the level accounts' names for the same reason.
+func (g *Game) validateAccountNames() Errors {
+	var errs Errors
+	for _, l := range g.Levels {
+		if gecosInvalid.MatchString(l.Name) {
+			errs = append(errs, fmt.Errorf(
+				"level %s: name %q cannot contain a colon or a newline; it would corrupt /etc/passwd", l.ID, l.Name))
+		}
+		if !Roles[l.Role] {
+			errs = append(errs, fmt.Errorf("level %s: unknown role %q", l.ID, l.Role))
+		}
+	}
+	return errs
 }

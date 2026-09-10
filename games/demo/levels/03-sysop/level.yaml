@@ -1,5 +1,7 @@
 id: sysop
 user: sysop
+name: Catalogue operator
+role: admin
 host: libsrv
 requires: [assistant]
 

@@ -1,5 +1,7 @@
 id: kiosk
 user: kiosk
+name: Catalogue kiosk
+role: plain
 host: libsrv
 requires: []
 

@@ -1,5 +1,7 @@
 id: backup-op
 user: bkup
+name: Backup operator
+role: backup
 host: relay2
 requires: [mailroom]
 
