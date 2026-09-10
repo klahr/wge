@@ -1,0 +1,12 @@
+id: sysop
+user: sysop
+host: libsrv
+requires: [assistant]
+
+# No grants: this is where the game ends.
+grants: []
+
+narrative:
+  motd: |
+    Kirjasto -- catalogue server
+    Operator account. Sessions are logged.

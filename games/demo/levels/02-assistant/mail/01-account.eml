@@ -1,0 +1,14 @@
+From atk@kirjasto.example  Tue Mar 11 09:22:10 2025
+From: ATK-tuki <atk@kirjasto.example>
+To: Hanna Leino <hleino@kirjasto.example>
+Subject: Re: nightly report is failing again
+Date: Tue, 11 Mar 2025 09:22:10 +0200
+
+It fails because it signs in as the operator account and somebody rotated
+that password without telling anyone. I have put the current one back in
+the script for now.
+
+I know. Write it down somewhere that is not a shell script and I will take
+it out again.
+
+> The 03:05 report has not run since Thursday. Can you look?

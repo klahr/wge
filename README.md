@@ -50,6 +50,13 @@ lazy creation, idle reaping, progress tracking and session recording possible.
 
 ## Authoring a game
 
+Games live one to a directory under `games/`. There are two:
+
+| | |
+|---|---|
+| `games/demo` | **Late Return** — three levels, one machine, nothing clever. The smallest game the engine will run, and the one to copy. |
+| `games/heist` | **The Mailroom Job** — four levels, a DAG whose last level is gated on a split credential, two machines, a service and cron. |
+
 A game is a directory:
 
 ```

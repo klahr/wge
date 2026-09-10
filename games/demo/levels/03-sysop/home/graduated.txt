@@ -1,0 +1,8 @@
+Here is what you were looking for.
+
+Tuomas Saarinen graduated in 2024. Nobody closed his account.
+
+    grep tsaarinen /var/log/auth.log
+
+Every session in there is after he left, and every one of them comes from
+an address inside the building.

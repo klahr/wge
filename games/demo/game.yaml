@@ -1,0 +1,27 @@
+id: demo
+version: 1
+title: Late Return
+synopsis: >
+  The university library's file server still carries an account for a student
+  who graduated two years ago, and somebody has been signing in with it. Three
+  accounts, one machine, and nothing clever: this is the smallest game the
+  engine will run, and the one to copy when writing a new one.
+
+base: wge/debian-13
+
+hosts:
+  - id: libsrv
+
+packages:
+  - less
+  - vim-tiny
+
+timeline:
+  # No start date, so the box's history is anchored to the build and its
+  # present is the real present. See the README on why that matters once
+  # anything on the machine is alive.
+  span: 60d
+
+# Four accounts that are nobody in particular. Without them the three home
+# directories under /home would be the whole game, written out.
+noise_users: 4

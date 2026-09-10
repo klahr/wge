@@ -1,0 +1,21 @@
+id: assistant
+user: hleino
+host: libsrv
+requires: [kiosk]
+
+grants:
+  # A credential hardcoded in a script that cron runs. The script has to be
+  # readable by the account cron runs it as, and that account is the level --
+  # which is what makes the permission the puzzle rather than an obstacle.
+  - kind: password
+    to: sysop
+    placed_in: /usr/local/bin/nightly-report
+
+cron:
+  - schedule: "5 3 * * *"
+    comment: overnight holds report for the circulation desk
+    command: /usr/local/bin/nightly-report
+
+narrative:
+  mail:
+    - mail/01-account.eml
