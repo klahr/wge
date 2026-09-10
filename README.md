@@ -251,7 +251,8 @@ wge invite                 create, list or revoke an invitation to enrol
 wge reset <handle> <game>  start a player's game over with new credentials
 ```
 
-`serve` takes `-open` (enrol without an invitation), `-max-machines`,
+`serve` takes `-open` (enrol without an invitation), `-container-runtime`,
+`-max-machines`,
 `-enroll-limit`, `-grace` (how long a container outlives its last session,
 default 15m), `-sweep` (how often abandoned containers are collected, default
 5m) and `-node` (this machine's name in the runs table).
@@ -389,6 +390,40 @@ Either way, enrolment attempts are rate limited per address — 60 an hour by
 default, which is generous because a workshop of thirty behind one office
 address is the normal case and a limit that turns them away is worse than the
 abuse it prevents. What it stops is the unbounded case.
+
+## The runtime under the containers
+
+A player is invited to attack the box they are on, so the boundary that matters
+is the container's. By default that is runc and the host kernel, which means
+escape is one kernel bug away. gVisor puts a reimplemented kernel in between
+and makes it a genuinely hard problem, so `serve -container-runtime runsc`
+exists.
+
+It needs registering with `--allow-suid`:
+
+```json
+"runtimes": {
+  "runsc": { "path": "/usr/bin/runsc", "runtimeArgs": ["--allow-suid"] }
+}
+```
+
+**gVisor ignores the setuid bit by default, and the failure is silent.**
+Containers start, every service runs, and the only thing that does not work is
+`su` — which is how a player moves between levels. The game would be broken in
+the one way nobody would think to test.
+
+So the engine tests it at startup, by doing it rather than reasoning about it:
+make a setuid copy of a binary that reports its effective uid, run it as
+somebody who is not root, and see who it says it is. If the answer is not root,
+`serve` refuses to start and prints the `daemon.json` above. Everything the
+boxes do turned out to work under gVisor otherwise — sysvinit as PID 1, sshd's
+privilege-separation chroot, cron, the MTA.
+
+One thing to be straight about: the check that gVisor ignores setuid was run
+here, and so was the refusal it produces. That `--allow-suid` then fixes it is
+what the `runsc` flag documents; registering it needs a daemon config change
+that was not made on this machine, so that half is documented rather than
+demonstrated.
 
 ## Admission control
 

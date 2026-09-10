@@ -174,3 +174,21 @@ func TestScratchVolumeIsPerRun(t *testing.T) {
 		t.Fatal("two runs share a scratch volume")
 	}
 }
+
+// A sandboxed runtime is the control that turns container escape from one
+// kernel bug away into a hard problem, so it has to actually reach the
+// container -- a setting that is read and never sent is worse than none,
+// because everything reports success.
+func TestContainerRuntimeReachesTheHostConfig(t *testing.T) {
+	d := &Docker{limits: DefaultLimits(), containerRuntime: "runsc"}
+	if got := d.hostConfig(nil, 1)["Runtime"]; got != "runsc" {
+		t.Fatalf("Runtime = %v, want runsc", got)
+	}
+
+	// Unset means the engine's own default, which is runc; sending an empty
+	// string would be an error rather than a default.
+	plain := &Docker{limits: DefaultLimits()}
+	if got, ok := plain.hostConfig(nil, 1)["Runtime"]; ok {
+		t.Fatalf("Runtime = %v with none configured, want it absent", got)
+	}
+}

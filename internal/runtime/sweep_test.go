@@ -421,3 +421,45 @@ func TestDestroyRunTakesMachinesNetworksAndScratch(t *testing.T) {
 		t.Error("the reaper still holds a destroyed machine")
 	}
 }
+
+// The preflight has to pass under the runtime the tests are running on, or
+// every game served by it is broken in the one way nobody thinks to check.
+func TestSetuidPreflightPassesUnderTheDefaultRuntime(t *testing.T) {
+	requireEngine(t)
+	d := newTestDocker(t, &recordingRuns{set: make(chan string, 1)})
+
+	if err := d.VerifySetuid(context.Background(), sweepImage); err != nil {
+		t.Fatalf("setuid does not work under this runtime, so su(1) cannot: %v", err)
+	}
+}
+
+// The preflight must leave nothing behind: it runs on every start.
+func TestSetuidPreflightCleansUpAfterItself(t *testing.T) {
+	requireEngine(t)
+	api := requireEngine(t)
+	ctx := context.Background()
+	d := newTestDocker(t, &recordingRuns{set: make(chan string, 1)})
+
+	if err := d.VerifySetuid(ctx, sweepImage); err != nil {
+		t.Fatalf("VerifySetuid: %v", err)
+	}
+
+	left, err := api.ListContainers(ctx, "wge.preflight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("the preflight left %d containers behind", len(left))
+	}
+
+	// And no volume: a preflight is not a run, and run zero has no notes.
+	volumes, err := api.ListVolumes(ctx, "wge.run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range volumes {
+		if v.Name == ScratchVolume(0) {
+			t.Fatalf("the preflight created %s", v.Name)
+		}
+	}
+}

@@ -10,7 +10,7 @@ BASE    ?= bases/debian-13
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all check fmt vet tidy build test test-integration base games ci ci-integration dist install clean
+.PHONY: all check fmt vet tidy build test test-integration base games ci ci-integration dist install clean $(BIN)
 
 all: check test
 
@@ -34,6 +34,8 @@ tidy:
 build:
 	$(GO) build ./...
 
+# Phony on purpose: a rule with no prerequisites is never remade, which means
+# every target that depends on it silently runs whatever was built first.
 $(BIN):
 	$(GO) build -o $(BIN) ./cmd/wge
 

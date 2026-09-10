@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -34,6 +35,7 @@ func cmdServe(args []string) error {
 	node := fs.String("node", "", "name of this machine in the runs table (default: hostname)")
 	noScratch := fs.Bool("no-scratch", false, "do not give runs a persistent scratch volume")
 	maxMachines := fs.Int("max-machines", 0, "most containers to run at once (default: derived from the engine's memory)")
+	containerRuntime := fs.String("container-runtime", "", "OCI runtime for game containers, e.g. runsc (default: the engine's own)")
 	open := fs.Bool("open", false, "let anybody enrol, without an invitation")
 	enrollLimit := fs.Int("enroll-limit", 0, "enrolment attempts allowed per address per window (-1 for no limit)")
 	enrollWindow := fs.Duration("enroll-window", broker.DefaultEnrollWindow, "the window the enrolment limit applies over")
@@ -76,22 +78,29 @@ func cmdServe(args []string) error {
 	}
 
 	rt, err := runtime.NewDocker(runtime.Options{
-		Socket:      *socket,
-		Images:      lib,
-		Seeder:      build.NewSeeder(*socket),
-		Runs:        st,
-		Node:        *node,
-		NoScratch:   *noScratch,
-		MaxMachines: *maxMachines,
-		Grace:       *grace,
-		Sweep:       *sweep,
-		Logger:      log,
+		Socket:           *socket,
+		Images:           lib,
+		Seeder:           build.NewSeeder(*socket),
+		Runs:             st,
+		Node:             *node,
+		NoScratch:        *noScratch,
+		MaxMachines:      *maxMachines,
+		ContainerRuntime: *containerRuntime,
+		Grace:            *grace,
+		Sweep:            *sweep,
+		Logger:           log,
 	})
 	if err != nil {
 		return err
 	}
 
 	if err := requireImages(ctx, rt, lib); err != nil {
+		return err
+	}
+	if err := requireRuntime(ctx, rt, *containerRuntime); err != nil {
+		return err
+	}
+	if err := requireSetuid(ctx, rt, lib, *containerRuntime); err != nil {
 		return err
 	}
 
@@ -120,7 +129,8 @@ func cmdServe(args []string) error {
 	}
 	log.Info("broker listening", "addr", bound.String(),
 		"fingerprint", ssh.FingerprintSHA256(hostKey.PublicKey()),
-		"enrollment", enrollmentMode(*open))
+		"enrollment", enrollmentMode(*open),
+		"container-runtime", runtimeName(*containerRuntime))
 
 	return srv.Serve(ctx)
 }
@@ -169,11 +179,83 @@ func requireImages(ctx context.Context, rt *runtime.Docker, lib *library.Library
 	return errors.New(strings.TrimRight(b.String(), "\n"))
 }
 
+// requireRuntime refuses to serve with a runtime the engine does not have.
+func requireRuntime(ctx context.Context, rt *runtime.Docker, want string) error {
+	if want == "" {
+		return nil
+	}
+
+	known, err := rt.Runtimes(ctx)
+	if err != nil {
+		return err
+	}
+	if known[want] {
+		return nil
+	}
+
+	var names []string
+	for name := range known {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return fmt.Errorf("the engine has no runtime %q; it knows: %s",
+		want, strings.Join(names, ", "))
+}
+
+// requireSetuid refuses to serve a game whose levels cannot be moved between.
+//
+// The check exists because the failure it catches is silent. gVisor ignores
+// the setuid bit unless it is started with --allow-suid: everything boots,
+// every service runs, and the only thing that does not work is su(1), which is
+// how a player gets from one level to the next.
+func requireSetuid(ctx context.Context, rt *runtime.Docker, lib *library.Library, containerRuntime string) error {
+	games := lib.All()
+	if len(games) == 0 {
+		return nil
+	}
+	g := games[0]
+	image := library.ImageName(g.ID, g.Version, g.HostIDs()[0])
+
+	err := rt.VerifySetuid(ctx, image)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, runtime.ErrSetuidIgnored) {
+		return fmt.Errorf("check that setuid works: %w", err)
+	}
+
+	name := containerRuntime
+	if name == "" {
+		name = "the engine's default runtime"
+	}
+	return fmt.Errorf(`%w
+
+su(1) is how a player moves between levels, and it cannot work: %s does not
+let a setuid binary elevate. gVisor does this unless it is registered with
+--allow-suid, for example in /etc/docker/daemon.json:
+
+    "runtimes": {
+      "runsc": {
+        "path": "/usr/bin/runsc",
+        "runtimeArgs": ["--allow-suid"]
+      }
+    }
+
+then: sudo systemctl reload docker`, err, name)
+}
+
 func enrollmentMode(open bool) string {
 	if open {
 		return "open"
 	}
 	return "invitation only"
+}
+
+func runtimeName(name string) string {
+	if name == "" {
+		return "engine default"
+	}
+	return name
 }
 
 // loadOrCreateHostKey keeps the host key stable across restarts. A key that

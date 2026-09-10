@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,10 +130,11 @@ type Docker struct {
 	limits Limits
 
 	// node identifies this machine in the runs table.
-	node    string
-	reaper  *reaper
-	sweep   time.Duration
-	scratch bool
+	node             string
+	containerRuntime string
+	reaper           *reaper
+	sweep            time.Duration
+	scratch          bool
 
 	// Admission. The lock covers counting and reserving together, so two
 	// connections arriving at once cannot both be told there is room for one.
@@ -160,6 +162,9 @@ type Options struct {
 	Runs Runs
 	// Node names this machine. Defaults to the system hostname.
 	Node string
+	// ContainerRuntime is the OCI runtime containers are created with. Empty
+	// takes the engine's default, which is runc.
+	ContainerRuntime string
 	// MaxMachines caps how many containers this node will run at once. Zero
 	// derives it from the memory the engine reports.
 	MaxMachines int
@@ -208,16 +213,17 @@ func NewDocker(opts Options) (*Docker, error) {
 	}
 
 	d := &Docker{
-		api:         docker.New(opts.Socket),
-		log:         opts.Logger,
-		images:      opts.Images,
-		seeder:      opts.Seeder,
-		runs:        opts.Runs,
-		limits:      opts.Limits,
-		node:        opts.Node,
-		sweep:       opts.Sweep,
-		scratch:     !opts.NoScratch,
-		maxMachines: opts.MaxMachines,
+		api:              docker.New(opts.Socket),
+		log:              opts.Logger,
+		images:           opts.Images,
+		seeder:           opts.Seeder,
+		runs:             opts.Runs,
+		limits:           opts.Limits,
+		node:             opts.Node,
+		containerRuntime: opts.ContainerRuntime,
+		sweep:            opts.Sweep,
+		scratch:          !opts.NoScratch,
+		maxMachines:      opts.MaxMachines,
 	}
 	d.reaper = newReaper(opts.Grace, d.destroy)
 	return d, nil
@@ -651,6 +657,14 @@ func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 		// the salt; restarts must go through creation.
 		"RestartPolicy": map[string]any{"Name": "no"},
 	}
+
+	// Left unset the engine picks its own default, which is runc. A sandboxed
+	// runtime is the control that turns container escape from one kernel bug
+	// away into a hard problem, on a machine whose whole purpose is to invite
+	// strangers to attack it.
+	if d.containerRuntime != "" {
+		cfg["Runtime"] = d.containerRuntime
+	}
 	if len(d.limits.StorageOpt) > 0 {
 		cfg["StorageOpt"] = d.limits.StorageOpt
 	}
@@ -667,6 +681,100 @@ func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 		}}
 	}
 	return cfg
+}
+
+// Runtimes returns the OCI runtimes the engine knows about.
+func (d *Docker) Runtimes(ctx context.Context) (map[string]bool, error) {
+	var info struct {
+		Runtimes map[string]struct {
+			Path string `json:"path"`
+		} `json:"Runtimes"`
+	}
+	if err := d.api.Get(ctx, "/info", &info); err != nil {
+		return nil, fmt.Errorf("read engine runtimes: %w", err)
+	}
+
+	known := make(map[string]bool, len(info.Runtimes))
+	for name := range info.Runtimes {
+		known[name] = true
+	}
+	return known, nil
+}
+
+// ErrSetuidIgnored is returned when the configured runtime does not honour the
+// setuid bit.
+var ErrSetuidIgnored = errors.New("the container runtime does not honour setuid")
+
+// PreflightTimeout bounds the startup checks. Generous, because a sandboxed
+// runtime boots more slowly than runc and a slow start is not a failure.
+const PreflightTimeout = 90 * time.Second
+
+// VerifySetuid checks that a setuid binary elevates under the configured
+// runtime.
+//
+// This is not a theoretical precaution. gVisor -- the sandboxed runtime worth
+// running this under -- ignores the setuid bit unless it is started with
+// --allow-suid, and the failure is silent: containers start, services run, and
+// the only thing that does not work is su(1), which is how a player moves
+// between levels. The game would be broken in the one way nobody would think
+// to test.
+//
+// So it is tested, once, at startup, by doing the thing rather than reasoning
+// about it: make a setuid copy of a binary that reports its effective uid, run
+// it as somebody who is not root, and see who it says it is.
+func (d *Docker) VerifySetuid(ctx context.Context, image string) error {
+	// Bounded, because a check that can hang forever is worse than one that
+	// fails: it takes the service down without saying why.
+	ctx, cancel := context.WithTimeout(ctx, PreflightTimeout)
+	defer cancel()
+
+	name := fmt.Sprintf("wge-preflight-%d", time.Now().UnixNano())
+
+	// The same sandbox a player gets, minus the scratch volume: this is not a
+	// run, and mounting run zero's notes would create a volume nobody owns.
+	host := d.hostConfig(nil, 0)
+	delete(host, "Mounts")
+
+	body := map[string]any{
+		"Image":      image,
+		"Entrypoint": []string{"/bin/sleep"},
+		"Cmd":        []string{"600"},
+		"Labels":     map[string]string{"wge.preflight": "1"},
+		"HostConfig": host,
+	}
+	if err := d.api.Post(ctx, "/containers/create?name="+name, body, nil); err != nil {
+		return fmt.Errorf("create preflight container: %w", err)
+	}
+	defer func() {
+		_ = d.api.Delete(context.WithoutCancel(ctx), "/containers/"+name+"?force=true&v=true")
+	}()
+
+	if err := d.api.Post(ctx, "/containers/"+name+"/start", nil, nil); err != nil {
+		return fmt.Errorf("start preflight container: %w", err)
+	}
+
+	const probe = "/tmp/wge-setuid-probe"
+	if res, err := d.api.Exec(ctx, name, docker.ExecOptions{
+		Cmd:  []string{"sh", "-c", "cp /usr/bin/id " + probe + " && chmod 4755 " + probe},
+		User: "root",
+	}); err != nil {
+		return fmt.Errorf("prepare setuid probe: %w", err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("prepare setuid probe: %s", strings.TrimSpace(res.Stderr))
+	}
+
+	// 65534 is nobody, and being numeric it needs no account in the image.
+	res, err := d.api.Exec(ctx, name, docker.ExecOptions{
+		Cmd: []string{probe, "-u"}, User: "65534",
+	})
+	if err != nil {
+		return fmt.Errorf("run setuid probe: %w", err)
+	}
+
+	if euid := strings.TrimSpace(res.Stdout); euid != "0" {
+		return fmt.Errorf("%w: a setuid binary ran as uid %s instead of 0", ErrSetuidIgnored, euid)
+	}
+	return nil
 }
 
 // MissingImages returns the images the engine does not have.
