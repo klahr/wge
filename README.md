@@ -29,20 +29,36 @@ The first feature that breaks this invariant costs all four at once.
 
 ## How a login works
 
-The credential a player found *is* their login:
+The credential a player found *is* their login, and they may name either the
+account it belongs to or the game it belongs to:
 
 ```
-ssh heist@game.example.com
+ssh <account>@game.example.com  # the account the password came with
+ssh heist@game.example.com      # the game, when the account is not yet known
 ```
 
 1. Their **public key** identifies the player and resolves their run.
 2. The server returns a partial success and asks for a **password**.
-3. That password is matched against every level's derived password for
-   *their* run. It selects the level they land on.
+3. Naming an account narrows the candidates to that account's level; naming
+   the game leaves every level of the run in play. Either way the password is
+   matched against the candidates' derived passwords for *their* run, and
+   whichever it matches is the level they land on.
 
 A player who has found level 6's password logs straight in as level 6. Inside
-the container all levels exist as real accounts, so `su` works too — both paths
-are legitimate.
+the container all levels exist as real accounts, so `su` works too — every
+path is legitimate.
+
+The account route is the one a player reaches for, because the previous level
+handed them a name as well as a password. The game route is what makes a
+credential enough on its own: a password found in a mailbox with nothing to
+say whose it is still gets its owner in.
+
+An account name is only a name. It is public in the sense that a walkthrough
+can list it, and worth nothing without that run's password, so nothing rests
+on keeping it secret. Two games may employ the same account name; the password
+decides which run and level was meant. An account on a machine that is not on
+the internet is not a front door login at all, because reaching that machine
+is the puzzle.
 
 Containers do not run `sshd`. One broker terminates every connection and
 attaches the player to a container it creates on demand, which is what makes
@@ -275,12 +291,23 @@ wge invite                 create, list or revoke an invitation to enrol
 wge reset <handle> <game>  start a player's game over with new credentials
 ```
 
-`serve` takes `-open` (enrol without an invitation), `-container-runtime`,
-`-max-machines`, `-min-free`, `-scratch-size`, `-storage-size`,
-`-enroll-limit`, `-grace` (how long a container outlives its last session,
-default 15m), `-sweep` (how often abandoned containers are collected, default
-5m), `-node` (this machine's name in the runs table) and `-nodes` (the pool of
-machines to run containers on).
+`serve` takes `-open` (enrol without an invitation), `-game` (the games to
+serve, by id, comma-separated; the default is every game under `-games`),
+`-container-runtime`, `-max-machines`, `-min-free`, `-scratch-size`,
+`-storage-size`, `-enroll-limit`, `-grace` (how long a container outlives its
+last session, default 15m), `-sweep` (how often abandoned containers are
+collected, default 5m), `-node` (this machine's name in the runs table) and
+`-nodes` (the pool of machines to run containers on).
+
+`serve` requires a built image for every game it serves, so `-game` is also how
+much you have to build: this repository ships two games, and serving one of
+them is not a reason to compile the other.
+
+Every command that touches the engine database takes `-db`, and its default —
+`wge.db` — is **relative to the current directory**. `serve` creates that file;
+the others refuse to, and say so, because a `wge invite` run from the wrong
+directory that quietly made itself a fresh database would hand out a code no
+server will ever accept.
 
 To play the example game:
 
@@ -289,11 +316,14 @@ wge base bases/debian-13          # the image games are built on
 wge build games/demo              # compile the game
 wge test  games/demo              # prove the built image enforces its graph
 wge invite                        # print an invitation code
-wge serve                         # or: wge serve -open
+wge serve -game demo              # or: wge serve -game demo -open
 
 ssh enroll@localhost -p 2222      # redeem the code, collect the first password
 ssh demo@localhost -p 2222        # play
 ```
+
+Drop `-game demo` once `wge build games/heist` has run too, and the same server
+offers both.
 
 ## Multi-host runs
 
@@ -415,6 +445,13 @@ Either way, enrolment attempts are rate limited per address — 60 an hour by
 default, which is generous because a workshop of thirty behind one office
 address is the normal case and a limit that turns them away is worse than the
 abuse it prevents. What it stops is the unbounded case.
+
+The engine prints its host key fingerprint in the `broker listening` line at
+startup, and that is the value a player checks the first time they connect.
+Port 2222 is where everybody's test containers have lived, so a workstation
+that has run anything else there arrives with stale entries in `known_hosts`
+and is told the host key has changed; `ssh-keygen -R "[localhost]:2222"`
+clears them.
 
 ## The runtime under the containers
 
@@ -697,11 +734,13 @@ systemctl enable --now wge
 sudo -u wge wge invite
 ```
 
-**`serve` refuses to start if a game's image was never built**, naming the
-image and the command that builds it. The alternative is a server that starts,
-reports itself healthy, and fails at the moment a player presents a correct
-password — which reads to them as a broken game and to whoever deployed it as
-nothing at all.
+**`serve` refuses to start if an image is missing for any game it serves**,
+naming the image and the command that builds it. The alternative is a server
+that starts, reports itself healthy, and fails at the moment a player presents
+a correct password — which reads to them as a broken game and to whoever
+deployed it as nothing at all. A deployment's `-games` directory holds the
+games that deployment serves; `-game` narrows it further when a directory
+holds more than is wanted.
 
 Every flag has an environment equivalent — `-max-machines` is
 `WGE_MAX_MACHINES` — so the unit carries an `EnvironmentFile` rather than a

@@ -254,10 +254,13 @@ func (s *Server) enroll(ctx context.Context, o *outcome, sess *Session) {
 	}
 
 	fmt.Fprintf(out, "\r\nYour account is %s. The password is:\r\n\r\n    %s\r\n", entry.User, password)
-	fmt.Fprintf(out, "\r\nWrite it down. Reconnect with:\r\n\r\n    ssh %s@<this host>\r\n", game.ID)
+	// The account is the username, which is the whole rule stated once by
+	// example: what a level hands over is a login, not a note to decode.
+	fmt.Fprintf(out, "\r\nWrite it down. Reconnect with:\r\n\r\n    ssh %s@<this host>\r\n", entry.User)
 	fmt.Fprintf(out, "\r\nThese credentials are yours alone -- another player's notes will not\r\n")
 	fmt.Fprintf(out, "open your copy of the game. Each level you reach ends in the credential\r\n")
-	fmt.Fprintf(out, "for the next; log back in with it to continue.\r\n")
+	fmt.Fprintf(out, "for the next: log back in as the account it names, or as %s if the\r\n", game.ID)
+	fmt.Fprintf(out, "password came with no name attached.\r\n")
 
 	// The one thing worth saying out of character about the machines: an idle
 	// box is eventually rebuilt, and anything written outside this directory

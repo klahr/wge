@@ -108,11 +108,42 @@ func (a *authenticator) banner(conn ssh.ConnMetadata) string {
 	if conn.User() == EnrollUser {
 		return "\r\n"
 	}
-	g, ok := a.cfg.Games.Game(conn.User())
-	if !ok {
-		return ""
+	if g, ok := a.cfg.Games.Game(conn.User()); ok {
+		return fmt.Sprintf("\r\n%s\r\n\r\n", g.Title)
 	}
-	return fmt.Sprintf("\r\n%s\r\n\r\n", g.Title)
+	if a.namesLevelAccount(conn.User()) {
+		// A level's account, which is a login like any other. Its game is not
+		// named: which game an account belongs to is part of what a player
+		// works out, and the banner is sent before anybody has proven a key.
+		return "\r\n"
+	}
+
+	// A username that is neither. On its own the rejection that follows is a
+	// bare "permission denied (publickey)", which reads as a broken key -- the
+	// one thing that is not wrong. Saying where the two halves of a credential
+	// go costs nothing here, because it names no game and no account.
+	return fmt.Sprintf("\r\nThere is nothing called %q on this server.\r\n"+
+		"Log in as the account whose password you found, or as the game:\r\n"+
+		"either way, the password is what chooses the level.\r\n"+
+		"\r\n    ssh <account>@<this host>\r\n"+
+		"    ssh <game>@<this host>\r\n"+
+		"\r\nNobody here yet? Connect as %s.\r\n\r\n", conn.User(), EnrollUser)
+}
+
+// namesLevelAccount reports whether a username is a level's account in any
+// game served. It answers the banner, which runs before a key is proven and so
+// cannot know whose runs to look in -- unlike the auth chain, which considers
+// only the player's own.
+func (a *authenticator) namesLevelAccount(user string) bool {
+	for _, g := range a.cfg.Games.All() {
+		external := g.ExternalHosts()
+		for _, l := range g.Levels {
+			if l.User == user && external[l.Host] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // keyVerified resolves the player and decides whether a password is still
@@ -156,38 +187,112 @@ func (a *authenticator) keyVerified(
 		return perms, nil
 	}
 
-	game, ok := a.cfg.Games.Game(requested)
-	if !ok {
-		// Deliberately terse: enumerating the games on offer is not something
-		// an unauthenticated stranger needs to be able to do.
-		return nil, fmt.Errorf("no such game")
-	}
 	if !known {
 		// No enrollment here. The banner has already told them where to go.
+		// This is also the answer to a username that names nothing at all:
+		// enumerating the games on offer is not something an unauthenticated
+		// stranger needs to be able to do.
 		return nil, fmt.Errorf("permission denied")
 	}
 
-	run, err := a.cfg.Store.Run(ctx, player.ID, game.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("no run of this game; connect as %s to start one", EnrollUser)
+	// Two ways to name what you are logging in to, and both are legitimate.
+	// A game lets any level's password select a level, which is how a player
+	// with a newly found credential gets in without knowing whose account it
+	// is. A level's account narrows it to that one level, which is how the
+	// credential reads on the box it came from: the account name was part of
+	// what the previous level yielded.
+	var targets []levelTarget
+	if game, isGame := a.cfg.Games.Game(requested); isGame {
+		run, err := a.cfg.Store.Run(ctx, player.ID, game.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("no run of this game; connect as %s to start one", EnrollUser)
+		}
+		if err != nil {
+			a.log.Error("look up run", "error", err)
+			return nil, fmt.Errorf("authentication unavailable")
+		}
+		targets = runTargets(game, run)
+	} else {
+		var err error
+		if targets, err = a.accountTargets(ctx, player, requested); err != nil {
+			a.log.Error("look up runs", "error", err)
+			return nil, fmt.Errorf("authentication unavailable")
+		}
 	}
-	if err != nil {
-		a.log.Error("look up run", "error", err)
-		return nil, fmt.Errorf("authentication unavailable")
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no game or reachable level account %q for this player", requested)
 	}
 
 	a.beginSecondStage()
 
-	// A run is in progress, so the second credential decides which level they
-	// land on. Both kinds are offered because a game may gate a level either
-	// way: a password found in a mailbox, or a private key recovered from a
-	// backup and decrypted with a passphrase found somewhere else.
+	// The second credential decides which of the targets they land on. Both
+	// kinds are offered because a game may gate a level either way: a password
+	// found in a mailbox, or a private key recovered from a backup and
+	// decrypted with a passphrase found somewhere else.
 	return nil, &ssh.PartialSuccessError{
 		Next: ssh.ServerAuthCallbacks{
-			PasswordCallback:  a.levelPassword(fingerprint, player, game, run),
-			PublicKeyCallback: a.levelKey(fingerprint, player, game, run),
+			PasswordCallback:  a.levelPassword(fingerprint, player, targets),
+			PublicKeyCallback: a.levelKey(fingerprint, player, targets),
 		},
 	}
+}
+
+// levelTarget is one level a second-stage credential may open: the level, the
+// game it belongs to, and the run whose salt derives its credentials.
+type levelTarget struct {
+	game  *manifest.Game
+	run   *store.Run
+	level *manifest.Level
+}
+
+// runTargets is every level of a run the front door will attach a player to.
+//
+// Levels on internal machines are left out. A credential for one is not
+// refused because it is wrong -- it is refused because that machine is not on
+// the internet, and reaching it is the puzzle.
+func runTargets(game *manifest.Game, run *store.Run) []levelTarget {
+	external := game.ExternalHosts()
+
+	var out []levelTarget
+	for _, l := range game.Levels {
+		if external[l.Host] {
+			out = append(out, levelTarget{game: game, run: run, level: l})
+		}
+	}
+	return out
+}
+
+// accountTargets finds the levels a login naming an account could mean.
+//
+// An account name is unique within a game, but nothing stops two games from
+// employing a sysop, so every level of that name across the player's own runs
+// is a candidate and the credential decides between them -- exactly as it
+// decides between the levels of one game. Only the player's runs are
+// considered: a level of a game they have never started is not theirs to log
+// in to, and searching every run on the server would make one player's
+// progress reachable with another player's key.
+func (a *authenticator) accountTargets(
+	ctx context.Context, player *store.Player, account string,
+) ([]levelTarget, error) {
+	runs, err := a.cfg.Store.PlayerRuns(ctx, player.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []levelTarget
+	for _, run := range runs {
+		game, ok := a.cfg.Games.Game(run.GameID)
+		if !ok {
+			// A run of a game this engine no longer serves.
+			continue
+		}
+		for _, t := range runTargets(game, run) {
+			if t.level.User == account {
+				out = append(out, t)
+			}
+		}
+	}
+	return out, nil
 }
 
 // levelKey accepts a level's own private key as the credential for that level.
@@ -198,22 +303,19 @@ func (a *authenticator) keyVerified(
 // decrypts the key locally and proves possession by signature -- which is
 // exactly how it would work against a real host.
 func (a *authenticator) levelKey(
-	fingerprint string, player *store.Player, game *manifest.Game, run *store.Run,
+	fingerprint string, player *store.Player, targets []levelTarget,
 ) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
 	return func(conn ssh.ConnMetadata, offered ssh.PublicKey) (*ssh.Permissions, error) {
-		d := run.Deriver()
 		marshalled := offered.Marshal()
 
-		external := game.ExternalHosts()
-
-		for _, l := range game.Levels {
+		for _, t := range targets {
 			// Only levels the game actually opens with a key. Every level has a
 			// derived key, but one the game never places is not a credential.
-			if !game.ReceivesKey(l.ID) || !external[l.Host] {
+			if !t.game.ReceivesKey(t.level.ID) {
 				continue
 			}
 
-			pub, err := ssh.NewPublicKey(d.SSHKey(l.ID).Public())
+			pub, err := ssh.NewPublicKey(t.run.Deriver().SSHKey(t.level.ID).Public())
 			if err != nil {
 				continue
 			}
@@ -226,8 +328,8 @@ func (a *authenticator) levelKey(
 			// once more with whichever key is finally used.
 			a.acceptLevelKey(ssh.FingerprintSHA256(offered), &outcome{
 				kind: outcomePlay, fingerprint: fingerprint,
-				player: player, game: game, run: run,
-				gameID: game.ID, levelID: l.ID,
+				player: player, game: t.game, run: t.run,
+				gameID: t.game.ID, levelID: t.level.ID,
 			})
 			return &ssh.Permissions{}, nil
 		}
@@ -236,29 +338,34 @@ func (a *authenticator) levelKey(
 	}
 }
 
-// levelPassword turns the password prompt into a level selection. Any level's
-// password is accepted, including one the player has not reached before: having
-// the credential *is* having solved the level, which is the whole premise.
+// levelPassword turns the password prompt into a level selection. A level the
+// player has not reached before is accepted like any other: having the
+// credential *is* having solved the level, which is the whole premise.
+//
+// Every target is compared even after one matches, so the time this takes says
+// nothing about which level a password belongs to.
 func (a *authenticator) levelPassword(
-	fingerprint string, player *store.Player, game *manifest.Game, run *store.Run,
+	fingerprint string, player *store.Player, targets []levelTarget,
 ) func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
 	return func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-		// Only levels on machines the front door can see. A credential for an
-		// internal machine is not refused because it is wrong -- it is refused
-		// because that machine is not on the internet, and reaching it is the
-		// puzzle.
-		levelID, ok := run.Deriver().Match(game.ExternalLevelIDs(), string(password))
-		if !ok {
+		var found *levelTarget
+		for i, t := range targets {
+			want := t.run.Deriver().Password(t.level.ID)
+			if subtle.ConstantTimeCompare([]byte(want), password) == 1 {
+				found = &targets[i]
+			}
+		}
+		if found == nil {
 			a.log.Info("level password rejected",
-				"handle", player.Handle, "game", game.ID,
+				"handle", player.Handle, "user", conn.User(),
 				"remote", conn.RemoteAddr().String())
 			return nil, fmt.Errorf("permission denied")
 		}
 
 		a.set(&outcome{
 			kind: outcomePlay, fingerprint: fingerprint,
-			player: player, game: game, run: run,
-			gameID: game.ID, levelID: levelID,
+			player: player, game: found.game, run: found.run,
+			gameID: found.game.ID, levelID: found.level.ID,
 		})
 		return &ssh.Permissions{}, nil
 	}

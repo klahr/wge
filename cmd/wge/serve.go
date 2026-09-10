@@ -29,6 +29,7 @@ func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", ":2222", "address to listen on")
 	gamesDir := fs.String("games", "games", "directory of game definitions")
+	only := fs.String("game", "", "games to serve, by id, comma-separated (default: every game under -games)")
 	dbPath := fs.String("db", "wge.db", "path to the engine database")
 	grace := fs.Duration("grace", runtime.DefaultGrace, "how long a container outlives its last session")
 	sweep := fs.Duration("sweep", runtime.DefaultSweep, "how often abandoned containers are collected")
@@ -65,6 +66,11 @@ func cmdServe(args []string) error {
 	lib, err := library.Load(*gamesDir)
 	if err != nil {
 		return err
+	}
+	if ids := splitList(*only); len(ids) > 0 {
+		if lib, err = lib.Only(ids); err != nil {
+			return err
+		}
 	}
 	for _, g := range lib.All() {
 		log.Info("game loaded", "id", g.ID, "version", g.Version, "levels", len(g.Levels))
@@ -118,10 +124,6 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	// Collect abandoned containers for as long as the broker is serving. The
-	// first pass runs immediately and clears whatever a previous process left.
-	go rt.Run(ctx)
-
 	srv, err := broker.New(broker.Config{
 		Addr:           *addr,
 		HostKey:        hostKey,
@@ -141,6 +143,15 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Collect abandoned containers for as long as the broker is serving. The
+	// first pass runs immediately and clears whatever a previous process left.
+	//
+	// It starts once the listener is bound, so a process that never becomes
+	// the server does not reap the containers of the one that is, and a
+	// startup that fails here does not report a cancelled sweep as an error.
+	go rt.Run(ctx)
+
 	log.Info("broker listening", "addr", bound.String(),
 		"fingerprint", ssh.FingerprintSHA256(hostKey.PublicKey()),
 		"enrollment", enrollmentMode(*open),
@@ -333,6 +344,17 @@ func parseNodes(spec string) ([]runtime.Node, error) {
 		out = append(out, runtime.Node{Name: name, Socket: endpoint})
 	}
 	return out, nil
+}
+
+// splitList reads a comma-separated flag value, in the shape -nodes takes.
+func splitList(spec string) []string {
+	var out []string
+	for _, item := range strings.Split(spec, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func enrollmentMode(open bool) string {

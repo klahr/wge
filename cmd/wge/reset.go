@@ -57,7 +57,7 @@ func cmdReset(args []string) error {
 		return fmt.Errorf("no game %q", gameID)
 	}
 
-	st, err := store.Open(ctx, *dbPath)
+	st, err := openStore(ctx, *dbPath)
 	if err != nil {
 		return err
 	}

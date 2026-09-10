@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/klahr/wge/internal/manifest"
 )
@@ -49,6 +50,40 @@ func Load(root string) (*Library, error) {
 		return nil, fmt.Errorf("no games found in %s", root)
 	}
 	return lib, nil
+}
+
+// Only narrows the library to the games named, for an engine that serves one
+// game out of a directory that holds several. Images are only required for the
+// games served, so serving one game does not mean building the rest.
+//
+// An id that names no game is an error rather than an empty selection: the
+// alternative turns a typo in the name of the only game being served into a
+// server that starts, offers nothing, and answers no password anybody has.
+func (l *Library) Only(ids []string) (*Library, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no game named to serve")
+	}
+
+	out := &Library{games: map[string]*manifest.Game{}}
+	for _, id := range ids {
+		g, ok := l.games[id]
+		if !ok {
+			return nil, fmt.Errorf("no game %q in the library; it holds: %s",
+				id, strings.Join(l.IDs(), ", "))
+		}
+		out.games[g.ID] = g
+	}
+	return out, nil
+}
+
+// IDs returns the id of every game, ordered.
+func (l *Library) IDs() []string {
+	out := make([]string, 0, len(l.games))
+	for id := range l.games {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Game implements broker.Games.

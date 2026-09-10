@@ -263,6 +263,42 @@ func (s *Store) Run(ctx context.Context, playerID int64, gameID string) (*Run, e
 	return &r, nil
 }
 
+// PlayerRuns returns every run a player has, oldest first.
+//
+// The front door needs it to resolve a login that names a level rather than a
+// game: the account name is unique inside a game but nothing stops two games
+// from employing a sysop, so the candidates are every level of that name the
+// player's own runs contain, and the credential decides between them.
+func (s *Store) PlayerRuns(ctx context.Context, playerID int64) ([]*Run, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, player_id, game_id, game_version, salt, current_host, created_at
+		   FROM runs WHERE player_id = ? ORDER BY created_at, id`, playerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*Run
+	for rows.Next() {
+		var r Run
+		var salt string
+		var host sql.NullString
+		var created int64
+
+		if err := rows.Scan(&r.ID, &r.PlayerID, &r.GameID, &r.GameVersion,
+			&salt, &host, &created); err != nil {
+			return nil, err
+		}
+		if r.Salt, err = creds.ParseSalt(salt); err != nil {
+			return nil, fmt.Errorf("run %d has a corrupt salt: %w", r.ID, err)
+		}
+		r.CurrentHost = host.String
+		r.CreatedAt = time.Unix(created, 0)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
 // ResetRun re-rolls a run's salt, giving the player the same game with entirely
 // new answers, and clears their progress. This is the remedy for a spoiled run:
 // nobody has to rebuild anything, because the container was only ever a

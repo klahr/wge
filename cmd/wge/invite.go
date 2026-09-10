@@ -34,7 +34,7 @@ func cmdInvite(args []string) error {
 	}
 
 	ctx := context.Background()
-	st, err := store.Open(ctx, *dbPath)
+	st, err := openStore(ctx, *dbPath)
 	if err != nil {
 		return err
 	}

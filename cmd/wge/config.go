@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/klahr/wge/internal/store"
 )
 
 // envPrefix is what a flag's environment equivalent is called.
@@ -42,4 +48,27 @@ func applyEnv(fs *flag.FlagSet) error {
 
 func envName(flagName string) string {
 	return envPrefix + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
+}
+
+// openStore opens the engine database for a command that reads one, refusing
+// to create it.
+//
+// serve makes the database; every other command works on the database serve
+// made. The default path is relative, so a command run from the wrong
+// directory would otherwise open a new, empty one and succeed -- which is an
+// invitation no server will ever accept, or a reset of a player who is not
+// there. The path is reported absolute, because the mistake is a directory.
+func openStore(ctx context.Context, path string) (*store.Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		shown := path
+		if abs, err := filepath.Abs(path); err == nil {
+			shown = abs
+		}
+		return nil, fmt.Errorf("no engine database at %s; wge serve creates it, "+
+			"so run this where the server runs or pass -db", shown)
+	}
+	return store.Open(ctx, path)
 }
