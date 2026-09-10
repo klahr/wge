@@ -40,9 +40,20 @@ type Limits struct {
 	NanoCPUs int64
 	// PidsLimit stops a fork bomb, which is the first thing a bored player tries.
 	PidsLimit int64
-	// StorageOpt caps the writable layer, e.g. {"size": "512m"}. Requires an
-	// overlay2 backend on xfs with pquota; empty disables the cap.
-	StorageOpt map[string]string
+	// StorageBytes caps a container's writable layer. Zero leaves it
+	// uncapped, which is the honest default: most storage drivers accept the
+	// limit and ignore it, so the engine proves it works before relying on it.
+	StorageBytes int64
+
+	// ScratchBytes is how much a run may keep in its scratch space before the
+	// player is told to clear some. It is a measurement and a warning, not a
+	// kernel quota: nothing portable can stop the write.
+	ScratchBytes int64
+
+	// MinFreeBytes is the room a host keeps back. Below it, no new run is
+	// started -- which protects the host whatever the storage driver can or
+	// cannot enforce.
+	MinFreeBytes int64
 
 	// Capabilities are added back after dropping ALL. See multiUserCaps.
 	Capabilities []string
@@ -91,6 +102,8 @@ func DefaultLimits() Limits {
 		NanoCPUs:     1_000_000_000,
 		PidsLimit:    256,
 		Capabilities: multiUserCaps,
+		ScratchBytes: 256 << 20,
+		MinFreeBytes: 5 << 30,
 	}
 }
 
@@ -138,6 +151,11 @@ type Docker struct {
 
 	// Admission. The lock covers counting and reserving together, so two
 	// connections arriving at once cannot both be told there is room for one.
+	root          string
+	storageDriver string
+	rootErr       error
+	rootOnce      sync.Once
+
 	admitMu      sync.Mutex
 	maxMachines  int
 	capacity     int
@@ -287,6 +305,8 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 	}
 
 	name := ContainerName(s.Run.ID, s.Level.Host)
+
+	d.warnAboutScratch(ctx, name, s)
 
 	execID, err := d.createExec(ctx, name, s)
 	if err != nil {
@@ -441,6 +461,34 @@ func (d *Docker) waitForBoot(ctx context.Context, name string) {
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+// warnAboutScratch tells a player when they are over their scratch allowance.
+//
+// Nothing portable can stop the write, so this is a notice rather than a
+// quota. It is still worth saying: a shared machine telling somebody their
+// space is full is what a shared machine does, and the alternative is an
+// operator discovering it instead.
+func (d *Docker) warnAboutScratch(ctx context.Context, container string, s *broker.Session) {
+	if !d.scratch || d.limits.ScratchBytes <= 0 {
+		return
+	}
+
+	used, err := d.scratchUsage(ctx, container)
+	if err != nil {
+		d.log.Debug("measure scratch", "name", container, "error", err)
+		return
+	}
+	if used <= d.limits.ScratchBytes {
+		return
+	}
+
+	d.log.Warn("run is over its scratch allowance",
+		"run", s.Run.ID, "used", used, "allowed", d.limits.ScratchBytes)
+
+	fmt.Fprintf(s.Stdout,
+		"\r\n%s is over quota: %s of %s. Clear some files.\r\n\r\n",
+		build.ScratchPath, humanBytes(used), humanBytes(d.limits.ScratchBytes))
 }
 
 // destroy removes a container whose grace period has run out, and the run's
@@ -665,8 +713,9 @@ func (d *Docker) hostConfig(networks []string, runID int64) map[string]any {
 	if d.containerRuntime != "" {
 		cfg["Runtime"] = d.containerRuntime
 	}
-	if len(d.limits.StorageOpt) > 0 {
-		cfg["StorageOpt"] = d.limits.StorageOpt
+	// Only sent when it has been proved to work; see VerifyStorageQuota.
+	if d.limits.StorageBytes > 0 {
+		cfg["StorageOpt"] = map[string]string{"size": strconv.FormatInt(d.limits.StorageBytes, 10)}
 	}
 
 	// The same volume on every machine in the run, so a player's notes follow

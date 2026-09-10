@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -461,5 +462,58 @@ func TestSetuidPreflightCleansUpAfterItself(t *testing.T) {
 		if v.Name == ScratchVolume(0) {
 			t.Fatalf("the preflight created %s", v.Name)
 		}
+	}
+}
+
+// Whatever this host's storage driver does, the check must come back with a
+// verdict rather than an error: either the limit holds, or it is ignored.
+func TestStorageQuotaCheckReachesAVerdict(t *testing.T) {
+	requireEngine(t)
+	limits := DefaultLimits()
+	limits.StorageBytes = 32 << 20
+
+	d, err := NewDocker(Options{
+		Images: stubImages{}, Seeder: stubSeeder{},
+		Node: "test-node", Limits: limits,
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	switch err := d.VerifyStorageQuota(context.Background(), sweepImage); {
+	case err == nil:
+		t.Log("this host enforces per-container storage limits")
+	case errors.Is(err, ErrStorageQuotaIgnored):
+		t.Logf("this host accepts the limit and ignores it, which is why it is checked: %v", err)
+	default:
+		t.Fatalf("the check failed rather than deciding: %v", err)
+	}
+}
+
+// The scratch measurement is taken from inside the run's own container,
+// because the engine cannot read the volume's directory on the host.
+func TestScratchUsageIsMeasurable(t *testing.T) {
+	api := requireEngine(t)
+	ctx := context.Background()
+	d := newTestDocker(t, &recordingRuns{set: make(chan string, 1)})
+
+	const name = "wge-scratch-probe"
+	_ = api.Delete(ctx, "/containers/"+name+"?force=true&v=true")
+	startFromImage(t, api, name, sweepImage, 9401, "main")
+
+	if _, err := api.Exec(ctx, name, docker.ExecOptions{
+		Cmd:  []string{"sh", "-c", "mkdir -p /srv/scratch && dd if=/dev/zero of=/srv/scratch/f bs=1k count=200"},
+		User: "root",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	used, err := d.scratchUsage(ctx, name)
+	if err != nil {
+		t.Fatalf("scratchUsage: %v", err)
+	}
+	if used < 200*1024 {
+		t.Fatalf("measured %d bytes after writing 200K", used)
 	}
 }

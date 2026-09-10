@@ -11,9 +11,15 @@ import (
 )
 
 // admissionFor builds a runtime with a fixed capacity and no engine behind it.
+//
+// The disk floor is off: these tests are about counting machines, and leaving
+// it on would have them ask a Docker engine that is not there.
 func admissionFor(capacity int) *Docker {
+	limits := DefaultLimits()
+	limits.MinFreeBytes = 0
+
 	d := &Docker{
-		limits:      DefaultLimits(),
+		limits:      limits,
 		log:         slog.New(slog.DiscardHandler),
 		maxMachines: capacity,
 	}

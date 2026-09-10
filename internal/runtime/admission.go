@@ -47,6 +47,12 @@ func (d *Docker) admit(ctx context.Context, targets []target) error {
 		return nil
 	}
 
+	// Room on the disk before room in memory: a host that fills up takes every
+	// run on it with it, not just the one that would have been started.
+	if err := d.checkDisk(ctx); err != nil {
+		return err
+	}
+
 	capacity := d.capacityLimit(ctx)
 	if len(held)+wanted > capacity {
 		return fmt.Errorf("%w: %d of %d machines in use, %d more needed",

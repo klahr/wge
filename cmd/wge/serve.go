@@ -36,6 +36,9 @@ func cmdServe(args []string) error {
 	noScratch := fs.Bool("no-scratch", false, "do not give runs a persistent scratch volume")
 	maxMachines := fs.Int("max-machines", 0, "most containers to run at once (default: derived from the engine's memory)")
 	containerRuntime := fs.String("container-runtime", "", "OCI runtime for game containers, e.g. runsc (default: the engine's own)")
+	storageSize := fs.Int64("storage-size", 0, "bytes a container may write to its own filesystem (0: uncapped; verified at startup)")
+	scratchSize := fs.Int64("scratch-size", 0, "bytes a run may keep in its scratch space before the player is told to clear some")
+	minFree := fs.Int64("min-free", 0, "bytes of disk to keep back; no new run is started below it")
 	open := fs.Bool("open", false, "let anybody enrol, without an invitation")
 	enrollLimit := fs.Int("enroll-limit", 0, "enrolment attempts allowed per address per window (-1 for no limit)")
 	enrollWindow := fs.Duration("enroll-window", broker.DefaultEnrollWindow, "the window the enrolment limit applies over")
@@ -86,6 +89,7 @@ func cmdServe(args []string) error {
 		NoScratch:        *noScratch,
 		MaxMachines:      *maxMachines,
 		ContainerRuntime: *containerRuntime,
+		Limits:           limitsFrom(*storageSize, *scratchSize, *minFree),
 		Grace:            *grace,
 		Sweep:            *sweep,
 		Logger:           log,
@@ -101,6 +105,9 @@ func cmdServe(args []string) error {
 		return err
 	}
 	if err := requireSetuid(ctx, rt, lib, *containerRuntime); err != nil {
+		return err
+	}
+	if err := requireStorageQuota(ctx, rt, lib); err != nil {
 		return err
 	}
 
@@ -242,6 +249,50 @@ let a setuid binary elevate. gVisor does this unless it is registered with
     }
 
 then: sudo systemctl reload docker`, err, name)
+}
+
+// limitsFrom starts from the defaults and applies whatever was configured.
+func limitsFrom(storage, scratch, minFree int64) runtime.Limits {
+	l := runtime.DefaultLimits()
+	if storage > 0 {
+		l.StorageBytes = storage
+	}
+	if scratch > 0 {
+		l.ScratchBytes = scratch
+	}
+	if minFree > 0 {
+		l.MinFreeBytes = minFree
+	}
+	return l
+}
+
+// requireStorageQuota refuses to serve with a size limit that does nothing.
+//
+// Docker accepts --storage-opt size on drivers that ignore it: overlayfs on
+// ext4 takes the option, reports success, and lets a container write until the
+// disk is full. An operator who configured a limit should find out here, not
+// from a full disk.
+func requireStorageQuota(ctx context.Context, rt *runtime.Docker, lib *library.Library) error {
+	games := lib.All()
+	if len(games) == 0 {
+		return nil
+	}
+	g := games[0]
+	image := library.ImageName(g.ID, g.Version, g.HostIDs()[0])
+
+	err := rt.VerifyStorageQuota(ctx, image)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, runtime.ErrStorageQuotaIgnored) {
+		return fmt.Errorf("check the storage quota: %w", err)
+	}
+	return fmt.Errorf(`%w
+
+A per-container size limit needs a storage driver that enforces one: overlay2
+on XFS with pquota, or btrfs. Leave -storage-size unset to run without it --
+the host is still protected by -min-free, which stops new runs before the disk
+fills`, err)
 }
 
 func enrollmentMode(open bool) string {

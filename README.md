@@ -252,7 +252,7 @@ wge reset <handle> <game>  start a player's game over with new credentials
 ```
 
 `serve` takes `-open` (enrol without an invitation), `-container-runtime`,
-`-max-machines`,
+`-max-machines`, `-min-free`, `-scratch-size`, `-storage-size`,
 `-enroll-limit`, `-grace` (how long a container outlives its last session,
 default 15m), `-sweep` (how often abandoned containers are collected, default
 5m) and `-node` (this machine's name in the runs table).
@@ -424,6 +424,37 @@ here, and so was the refusal it produces. That `--allow-suid` then fixes it is
 what the `runsc` flag documents; registering it needs a daemon config change
 that was not made on this machine, so that half is documented rather than
 demonstrated.
+
+## What a player can write
+
+Three mechanisms, because only one of them is a kernel quota and saying
+otherwise would be the whole problem.
+
+**The host keeps room back.** Below `-min-free` no new run starts. This works
+on any storage driver and protects everything on the filesystem, not just one
+run. It is the only one of the three that keeps the machine alive, and it is on
+by default. A player turned away is told the host is at capacity, which is
+true; the operator's log says which resource ran out.
+
+**A run's scratch is measured, not capped.** Over `-scratch-size` the player is
+told on login — `/srv/scratch is over quota: 4M of 1M. Clear some files.` —
+and the operator gets a warning. Nothing portable can stop the write, so this
+is a notice, and a shared machine telling somebody their space is full is what
+a shared machine does. The measurement is taken from inside the run's own
+container, because the engine cannot read the volume's directory on the host
+and does not need to.
+
+**A container's own filesystem can have a real quota, if the driver has one.**
+`-storage-size` sets it, and the engine **proves it works before relying on
+it**: at startup it writes past the limit in a throwaway container and refuses
+to serve if the write succeeds.
+
+That check is not hypothetical. Docker accepts `--storage-opt size` on drivers
+that do nothing with it — on `overlayfs` over ext4 a container limited to 64M
+wrote 200M without complaint. A quota an operator believes in and does not have
+is worse than no quota, because it is the one they stop watching. So the
+default is off, and configuring it on a host that cannot enforce it is a
+service that will not start rather than a limit that quietly does nothing.
 
 ## Admission control
 
