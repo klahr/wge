@@ -8,6 +8,14 @@ FROM debian:13-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# wtmpdb and lastlog2 are installed after the systemd purge, not before.
+#
+# They arrive as dependencies of systemd, so --auto-remove takes them with it,
+# and losing them costs more than it looks: wtmpdb ships /usr/bin/last, and a
+# Unix box where last(1) does not exist is a box nobody has ever administered.
+# Reinstalled explicitly they bring no systemd back with them, and the login
+# history the aging pass writes becomes something a player can actually read.
+
 # sysvinit rather than systemd.
 #
 # This is a security decision before it is an aesthetic one. systemd will not
@@ -31,7 +39,9 @@ RUN apt-get update \
       iproute2 netcat-openbsd \
       bsd-mailx openssh-client ca-certificates \
       sudo man-db inetutils-syslogd openssh-server \
+      wtmpdb lastlog2 \
  && apt-get purge -y --auto-remove systemd \
+ && apt-get install -y --no-install-recommends wtmpdb lastlog2 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log \
       /var/log/alternatives.log
 

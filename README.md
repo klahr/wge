@@ -207,9 +207,9 @@ that away in about four seconds. This is where realism is actually won:
   moment, and a deliberate minority are much older than their neighbours.
 - **Shell history that stops mid-thought.** Timestamped, flavoured by what the
   account does, ending on a half-typed command.
-- **A login history the box remembers.** `last` and `lastlog` in both the
-  classic binary format and the SQLite one Debian 13 replaced it with, plus a
-  matching `/var/log/auth.log` -- all rendered from one list of sessions, so a
+- **A login history the box remembers.** `last` and `lastlog2` read it, in both
+  the classic binary format and the SQLite one Debian 13 replaced it with, plus
+  a matching `/var/log/auth.log` — all rendered from one list of sessions, so a
   player who cross-checks them finds one story rather than two.
 - **Decoy accounts.** A `/home` with exactly as many directories as the game has
   levels has handed over its own structure.
@@ -424,6 +424,12 @@ here, and so was the refusal it produces. That `--allow-suid` then fixes it is
 what the `runsc` flag documents; registering it needs a daemon config change
 that was not made on this machine, so that half is documented rather than
 demonstrated.
+
+There is a second reason to want it, which has nothing to do with security.
+`/proc` under runc is the host's, so `uptime` reports how long the *host* has
+been up — 19 days on the machine this was written on — while the box's own boot
+record says it started minutes ago. Two commands a player will certainly run,
+contradicting each other. gVisor virtualises `/proc`, and the two agree.
 
 ## What a player can write
 
@@ -674,17 +680,12 @@ Next, roughly in order:
    a node runs, but nothing caps what a player writes. A disk quota on the
    backing filesystem is the only control there is today, and the same is true
    of each container's writable layer.
-3. **The dead login databases.** The aging pass writes `wtmpdb` and `lastlog2`
-   SQLite databases, but purging systemd from the base took the commands that
-   read them, so on this base they are generated and never looked at. The
-   binary `wtmp` and `lastlog` are the live ones. Either reinstate the tools or
-   stop writing the databases.
-4. **gVisor or Kata.** The design called for a sandboxed runtime and it was
+3. **gVisor or Kata.** The design called for a sandboxed runtime and it was
    never done. It costs syscall performance nobody will notice on a box where
    people run `grep`, and it turns container escape from one kernel bug away
    into a genuinely hard problem — which matters on a machine whose whole
    purpose is to invite strangers to attack it.
-5. **More than one node.** A run is a pure function of its salt and
+4. **More than one node.** A run is a pure function of its salt and
    `runs.current_host` already pins it to a machine, so the scheduling is
    mostly there; what is missing is anything that routes a player to a second
    node, and the scratch volume is the one thing that does not travel.
