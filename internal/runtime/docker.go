@@ -113,6 +113,10 @@ type Seeder interface {
 // player is sent back to the box they left rather than to a rebuilt one.
 type Runs interface {
 	SetHost(ctx context.Context, runID int64, node string) error
+
+	// RecordProgress notes that a run reached a level. It is called for levels
+	// the player got to from inside the run, which the front door never sees.
+	RecordProgress(ctx context.Context, runID int64, levelID string) error
 }
 
 // Docker attaches players to containers via the Engine API.
@@ -128,6 +132,11 @@ type Docker struct {
 	node   string
 	reaper *reaper
 	sweep  time.Duration
+
+	// authOffsets records how far each machine's auth log had got when it
+	// finished booting, so that live sessions can be told from the history the
+	// aging pass wrote.
+	authOffsets sync.Map
 
 	// creating serialises container creation per name, so two sessions racing
 	// into the same run do not both try to create its box.
@@ -228,6 +237,10 @@ func (d *Docker) Attach(ctx context.Context, s *broker.Session) (int, error) {
 		held = append(held, t)
 	}
 	defer func() {
+		// Before letting go: read back which levels the player reached from
+		// inside the run, which is the only place that can be seen.
+		d.collectProgress(s)
+
 		for _, t := range held {
 			d.reaper.release(t)
 		}
@@ -343,6 +356,9 @@ func (d *Docker) ensureContainer(ctx context.Context, s *broker.Session, host st
 	// connections -- both of which are the engine's startup showing through.
 	d.waitForBoot(ctx, name)
 
+	// Everything the auth log gains from here happened during play.
+	d.markLive(ctx, name)
+
 	d.log.Info("machine created", "name", name, "image", image, "host", host, "run", s.Run.ID)
 	return nil
 }
@@ -396,6 +412,7 @@ func (d *Docker) destroy(t target) {
 	}
 	d.reaper.forget(t.Name)
 	d.creating.Delete(t.Name)
+	d.authOffsets.Delete(t.Name)
 
 	// A run spanning several machines keeps its placement, and its networks,
 	// until the last of them is gone.

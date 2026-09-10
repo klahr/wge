@@ -281,6 +281,30 @@ everywhere would put its level's home directory on every machine, which on a
 multi-host game means the final level's payoff sitting on the box the player
 starts from.
 
+## Progress
+
+The front door records a level when it attaches somebody to one, which misses
+every move a player makes from inside: `su` between two accounts on a machine,
+and `ssh` to another machine in the run. For a level on a host the front door
+will not attach to, that is the difference between recorded late and never
+recorded at all.
+
+The box already knows, so nothing is installed to ask it. Both routes leave the
+same line in `/var/log/auth.log` — sshd and `su` each write
+`pam_unix(<service>:session): session opened for user <name>` — and at the end
+of a session the engine reads back what has been added and matches the accounts
+against the game's levels.
+
+The trick is telling a live session from the history the aging pass wrote, and
+it is deliberately not a matter of parsing: the generated history uses exactly
+the format a real session uses, because anything else would be a tell. Instead
+the engine records how far the file had got the moment the machine finished
+booting. Everything past that offset happened during play, by construction —
+no timestamp is parsed, which matters because syslog lines carry no year.
+
+A failed `su` records nothing, and a session opened as a decoy account is not a
+level, so neither reaches the table.
+
 ## Container lifecycle
 
 Containers are created when a player connects and destroyed when they stop
@@ -385,14 +409,7 @@ Next, roughly in order:
    it already knows whether a player is circling or stalled — no in-container
    agent to find or tamper with. Hints arrive as mail from an in-fiction
    correspondent, escalating in tiers, and unprompted when a player stalls.
-3. **Progress for in-run transitions.** The broker records a level when it
-   attaches a player to it, so a level reached by `su` or by pivoting to
-   another machine is never recorded — which for an internal host means never
-   at all, since the front door will not attach there. The box already knows:
-   the answer is to read the login databases (`/var/log/wtmp.db`) back out of
-   each container and take any session later than the container's creation as
-   real. No in-container agent, and nothing for a player to find.
-4. **Scratch persistence.** A reap currently loses whatever the player wrote. A
+3. **Scratch persistence.** A reap currently loses whatever the player wrote. A
    small per-run volume mounted somewhere they keep notes would cost little and
    remove the one real sting.
 5. **Admission control.** Nothing yet refuses a connection when a machine is

@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/klahr/wge/internal/broker"
 	"github.com/klahr/wge/internal/build"
 	"github.com/klahr/wge/internal/docker"
+	"github.com/klahr/wge/internal/library"
 	"github.com/klahr/wge/internal/manifest"
+	"github.com/klahr/wge/internal/store"
 )
 
 // sweepImage is any image that stays up; the sweep does not care what is in it.
@@ -25,10 +30,26 @@ func (stubSeeder) Seed(context.Context, string, *manifest.Game, string, *build.R
 	return nil
 }
 
-// recordingRuns captures the placement calls the runtime makes.
+// recordingRuns captures the placement and progress calls the runtime makes.
 type recordingRuns struct {
 	set   chan string
 	runID int64
+
+	mu       sync.Mutex
+	progress []string
+}
+
+func (r *recordingRuns) RecordProgress(_ context.Context, _ int64, levelID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.progress = append(r.progress, levelID)
+	return nil
+}
+
+func (r *recordingRuns) reached() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string{}, r.progress...)
 }
 
 func (r *recordingRuns) SetHost(_ context.Context, runID int64, node string) error {
@@ -186,4 +207,101 @@ func TestSweepSparesContainersAwaitingTheirGracePeriod(t *testing.T) {
 	if !exists(t, api, name) {
 		t.Fatal("the sweep collected a container inside its grace period")
 	}
+}
+
+// The end-to-end shape of progress collection: a machine boots, a session is
+// opened on it from inside, and the level is recorded without the front door
+// ever having attached anybody to it.
+func TestProgressIsCollectedFromInsideTheRun(t *testing.T) {
+	api := requireEngine(t)
+	ctx := context.Background()
+
+	game, err := manifest.Load(filepath.Join("..", "..", "games", "heist"))
+	if err != nil {
+		t.Fatalf("load reference game: %v", err)
+	}
+
+	const runID = 9101
+	image := library.ImageName(game.ID, game.Version, "relay2")
+
+	var info struct{ ID string }
+	if err := api.Get(ctx, "/images/"+image+"/json", &info); err != nil {
+		t.Skipf("image %s is not available: %v", image, err)
+	}
+
+	runs := &recordingRuns{set: make(chan string, 4)}
+	d := newTestDocker(t, runs)
+
+	name := ContainerName(runID, "relay2")
+	startFromImage(t, api, name, image, runID, "relay2")
+
+	d.waitForBoot(ctx, name)
+	d.markLive(ctx, name)
+
+	// Nothing has happened yet, so nothing should be claimed.
+	d.collectProgress(sessionFor(game, runID))
+	if got := runs.reached(); len(got) != 0 {
+		t.Fatalf("levels reported before anything happened: %v", got)
+	}
+
+	// A transition made from inside the machine, which the front door cannot
+	// see: root opening a session as the backup operator.
+	if _, err := api.Exec(ctx, name, docker.ExecOptions{
+		Cmd: []string{"su", "-", "bkup", "-c", "true"}, User: "root",
+	}); err != nil {
+		t.Fatalf("su inside the container: %v", err)
+	}
+
+	d.collectProgress(sessionFor(game, runID))
+
+	var found bool
+	for _, level := range runs.reached() {
+		if level == "backup-op" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the level reached from inside was not recorded; got %v", runs.reached())
+	}
+}
+
+// sessionFor builds the minimum a progress collection needs.
+func sessionFor(game *manifest.Game, runID int64) *broker.Session {
+	return &broker.Session{
+		Game: game,
+		Run:  &store.Run{ID: runID, GameID: game.ID, GameVersion: game.Version},
+	}
+}
+
+// startFromImage brings up a real game image under the labels the engine uses.
+func startFromImage(t *testing.T, api *docker.Client, name, image string, runID int64, host string) {
+	t.Helper()
+	ctx := context.Background()
+
+	_ = api.Delete(ctx, "/containers/"+name+"?force=true&v=true")
+
+	body := map[string]any{
+		"Image":    image,
+		"Hostname": host,
+		"Labels": map[string]string{
+			"wge.run": fmt.Sprint(runID), "wge.game": "heist", "wge.host": host,
+		},
+		"HostConfig": map[string]any{
+			"NetworkMode": "none",
+			"CapDrop":     []string{"ALL"},
+			"CapAdd": []string{
+				"SETUID", "SETGID", "CHOWN", "FOWNER", "FSETID",
+				"DAC_OVERRIDE", "KILL", "AUDIT_WRITE", "NET_BIND_SERVICE", "SYS_CHROOT",
+			},
+		},
+	}
+	if err := api.Post(ctx, "/containers/create?name="+name, body, nil); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	if err := api.Post(ctx, "/containers/"+name+"/start", nil, nil); err != nil {
+		t.Fatalf("start %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		_ = api.Delete(context.Background(), "/containers/"+name+"?force=true&v=true")
+	})
 }
