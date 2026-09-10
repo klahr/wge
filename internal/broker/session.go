@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/klahr/wge/internal/build"
 	"github.com/klahr/wge/internal/manifest"
@@ -355,7 +356,22 @@ func (s *Server) chooseGame(sess *Session) (*manifest.Game, error) {
 }
 
 func (s *Server) registerPlayer(ctx context.Context, o *outcome, sess *Session) (*store.Player, error) {
+	// Counted before anything is asked, so that a script working through
+	// invitation codes is stopped by the same limit as one creating players.
+	if !s.limiter.allow(o.remote, time.Now()) {
+		s.log.Warn("enrolment refused: too many attempts", "remote", hostOf(o.remote))
+		return nil, fmt.Errorf("too many enrolment attempts from this address; try again later")
+	}
+
 	fmt.Fprintf(sess.Stdout, "\r\nThis key hasn't been seen before.\r\n")
+
+	var token string
+	if !s.cfg.OpenEnrollment {
+		var err error
+		if token, err = s.askInvite(ctx, sess); err != nil {
+			return nil, err
+		}
+	}
 
 	for attempt := 0; attempt < 3; attempt++ {
 		fmt.Fprintf(sess.Stdout, "Choose a handle: ")
@@ -370,16 +386,66 @@ func (s *Server) registerPlayer(ctx context.Context, o *outcome, sess *Session) 
 			continue
 		}
 
-		player, err := s.cfg.Store.CreatePlayer(ctx, handle, o.fingerprint)
-		if err != nil {
-			// Almost always a duplicate handle; nothing here is worth leaking
-			// database detail over.
-			fmt.Fprintf(sess.Stdout, "That handle is taken.\r\n")
-			continue
+		var player *store.Player
+		if token == "" {
+			player, err = s.cfg.Store.CreatePlayer(ctx, handle, o.fingerprint)
+		} else {
+			// The invitation is spent in the same transaction that creates the
+			// player, so a failure here costs nobody their place.
+			player, err = s.cfg.Store.RedeemInvite(ctx, token, handle, o.fingerprint)
 		}
-		return player, nil
+		if err == nil {
+			s.log.Info("player enrolled", "handle", handle, "invited", token != "",
+				"remote", hostOf(o.remote))
+			return player, nil
+		}
+
+		// An invitation that went while the handle was being chosen is not the
+		// handle's fault, and saying "that handle is taken" would send them
+		// hunting for the wrong problem.
+		switch {
+		case errors.Is(err, store.ErrInviteSpent):
+			return nil, fmt.Errorf("that invitation was taken while you were choosing a handle")
+		case errors.Is(err, store.ErrInviteUnknown), errors.Is(err, store.ErrInviteExpired):
+			return nil, fmt.Errorf("that invitation is no longer valid")
+		}
+
+		// Almost always a duplicate handle; nothing here is worth leaking
+		// database detail over.
+		fmt.Fprintf(sess.Stdout, "That handle is taken.\r\n")
 	}
 	return nil, fmt.Errorf("no handle chosen")
+}
+
+// askInvite collects an invitation code and checks it before going further.
+func (s *Server) askInvite(ctx context.Context, sess *Session) (string, error) {
+	fmt.Fprintf(sess.Stdout, "\r\nThis server is invitation only.\r\n")
+
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprintf(sess.Stdout, "\r\nInvitation code: ")
+		line, err := readLine(sess.Stdin, sess.Stdout)
+		if err != nil {
+			return "", fmt.Errorf("enrollment cancelled")
+		}
+
+		// A code is not a secret its holder needs protecting from, so the
+		// reason it failed is worth saying: somebody hunting a typo that is not
+		// there gives up on the game, not on the code.
+		switch err := s.cfg.Store.CheckInvite(ctx, line); {
+		case err == nil:
+			return line, nil
+		case errors.Is(err, store.ErrInviteUnknown):
+			fmt.Fprintf(sess.Stdout, "That is not a code I recognise.\r\n")
+		case errors.Is(err, store.ErrInviteSpent):
+			fmt.Fprintf(sess.Stdout, "That code has already been used.\r\n")
+		case errors.Is(err, store.ErrInviteExpired):
+			fmt.Fprintf(sess.Stdout, "That code has expired.\r\n")
+		default:
+			s.log.Error("check invitation", "error", err)
+			return "", fmt.Errorf("could not check that code, try again shortly")
+		}
+	}
+	return "", fmt.Errorf("no valid invitation")
 }
 
 // readLine reads one line, echoing as it goes. The client's terminal is in raw

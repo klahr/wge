@@ -69,6 +69,28 @@ func (f *fakeRuntime) levels() []string {
 	return append([]string{}, f.attached...)
 }
 
+// syncBuffer collects a session's output.
+//
+// x/crypto/ssh copies stdout and stderr in two goroutines, so a plain
+// strings.Builder shared between them is a data race -- latent for as long as
+// only one stream carried anything.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 type gameSet map[string]*manifest.Game
 
 func (g gameSet) Game(id string) (*manifest.Game, bool) {
@@ -93,6 +115,7 @@ func testGame() *manifest.Game {
 }
 
 type harness struct {
+	srv     *Server
 	addr    string
 	store   *store.Store
 	runtime *fakeRuntime
@@ -127,6 +150,13 @@ func newHarness(t *testing.T) *harness {
 
 func newHarnessWith(t *testing.T, game *manifest.Game) *harness {
 	t.Helper()
+	// Most tests are about what happens after somebody is a player, so they
+	// take the open door. The invitation tests ask for the closed one.
+	return newHarnessMode(t, game, true)
+}
+
+func newHarnessMode(t *testing.T, game *manifest.Game, open bool) *harness {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -139,12 +169,13 @@ func newHarnessWith(t *testing.T, game *manifest.Game) *harness {
 	rt := &fakeRuntime{}
 
 	srv, err := New(Config{
-		Addr:    "127.0.0.1:0",
-		HostKey: newSigner(t),
-		Store:   st,
-		Games:   gameSet{game.ID: game},
-		Runtime: rt,
-		Logger:  slog.New(slog.DiscardHandler),
+		Addr:           "127.0.0.1:0",
+		HostKey:        newSigner(t),
+		Store:          st,
+		Games:          gameSet{game.ID: game},
+		Runtime:        rt,
+		Logger:         slog.New(slog.DiscardHandler),
+		OpenEnrollment: open,
 	})
 	if err != nil {
 		t.Fatalf("new broker: %v", err)
@@ -157,7 +188,7 @@ func newHarnessWith(t *testing.T, game *manifest.Game) *harness {
 	go srv.Serve(ctx)
 	t.Cleanup(func() { srv.Close() })
 
-	return &harness{addr: addr.String(), store: st, runtime: rt, game: game}
+	return &harness{srv: srv, addr: addr.String(), store: st, runtime: rt, game: game}
 }
 
 func newSigner(t *testing.T) ssh.Signer {
@@ -188,6 +219,19 @@ func (h *harness) dial(t *testing.T, key ssh.Signer, methods ...ssh.AuthMethod) 
 // along with the entry password it was given.
 func (h *harness) enroll(t *testing.T, key ssh.Signer, handle string) string {
 	t.Helper()
+	out := h.enrollDialog(t, key, handle)
+
+	password := extractPassword(t, out)
+	if password == "" {
+		t.Fatalf("enrollment did not hand over a password; output:\n%s", out)
+	}
+	return password
+}
+
+// enrollDialog walks the enrolment entrance, answering each prompt in turn,
+// and returns everything the server said.
+func (h *harness) enrollDialog(t *testing.T, key ssh.Signer, answers ...string) string {
+	t.Helper()
 
 	client, err := ssh.Dial("tcp", h.addr, &ssh.ClientConfig{
 		User:            EnrollUser,
@@ -210,23 +254,19 @@ func (h *harness) enroll(t *testing.T, key ssh.Signer, handle string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out strings.Builder
+	var out syncBuffer
 	sess.Stdout = &out
 	sess.Stderr = &out
 
 	if err := sess.Shell(); err != nil {
 		t.Fatalf("shell: %v", err)
 	}
-	fmt.Fprintf(stdin, "%s\r", handle)
-	if err := sess.Wait(); err != nil {
-		t.Fatalf("enrollment session: %v (output: %q)", err, out.String())
+	for _, answer := range answers {
+		fmt.Fprintf(stdin, "%s\r", answer)
 	}
+	_ = sess.Wait()
 
-	password := extractPassword(t, out.String())
-	if password == "" {
-		t.Fatalf("enrollment did not hand over a password; output:\n%s", out.String())
-	}
-	return password
+	return out.String()
 }
 
 // extractPassword picks the indented credential out of the enrollment text.
@@ -626,7 +666,7 @@ func (h *harness) enrollAgain(t *testing.T, key ssh.Signer, answer string) strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out strings.Builder
+	var out syncBuffer
 	sess.Stdout = &out
 	sess.Stderr = &out
 
@@ -741,7 +781,7 @@ func TestCapacityRefusalSaysSo(t *testing.T) {
 	}
 	defer sess.Close()
 
-	var out strings.Builder
+	var out syncBuffer
 	sess.Stdout = &out
 	sess.Stderr = &out
 	runErr := sess.Run("")
@@ -760,5 +800,122 @@ func TestCapacityRefusalSaysSo(t *testing.T) {
 	}
 	if exit.ExitStatus() != exitTempFail {
 		t.Errorf("exit status = %d, want %d (EX_TEMPFAIL)", exit.ExitStatus(), exitTempFail)
+	}
+}
+
+// A server nobody has to be invited to is a server anybody can fill.
+func TestEnrolmentRequiresAnInvitation(t *testing.T) {
+	h := newHarnessMode(t, testGame(), false)
+	ctx := context.Background()
+	key := newSigner(t)
+
+	out := h.enrollDialog(t, key, "NOPE-NOPE-NOPE-NOPE", "NOPE-NOPE-NOPE-NOPE", "NOPE-NOPE-NOPE-NOPE")
+
+	if !strings.Contains(out, "invitation only") {
+		t.Fatalf("the server did not say it was closed:\n%s", out)
+	}
+	if !strings.Contains(out, "not a code I recognise") {
+		t.Errorf("a wrong code was not explained:\n%s", out)
+	}
+	if extractPassword(t, out) != "" {
+		t.Fatal("a game was started without an invitation")
+	}
+	if _, err := h.store.PlayerByKey(ctx, ssh.FingerprintSHA256(key.PublicKey())); err == nil {
+		t.Fatal("a player was created without an invitation")
+	}
+}
+
+func TestEnrolmentWithAnInvitation(t *testing.T) {
+	h := newHarnessMode(t, testGame(), false)
+	ctx := context.Background()
+	key := newSigner(t)
+
+	token, err := store.NewInviteToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.CreateInvite(ctx, token, 1, time.Time{}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := h.enrollDialog(t, key, token, "rook")
+	if extractPassword(t, out) == "" {
+		t.Fatalf("an invited player was not let in:\n%s", out)
+	}
+
+	player, err := h.store.PlayerByKey(ctx, ssh.FingerprintSHA256(key.PublicKey()))
+	if err != nil {
+		t.Fatalf("the invited player was not created: %v", err)
+	}
+	if player.Handle != "rook" {
+		t.Errorf("handle = %q", player.Handle)
+	}
+
+	// And the invitation is spent.
+	if err := h.store.CheckInvite(ctx, token); !errors.Is(err, store.ErrInviteSpent) {
+		t.Fatalf("after enrolment the invitation is %v, want spent", err)
+	}
+}
+
+// The reason a code failed is worth saying: somebody hunting a typo that is
+// not there gives up on the game rather than on the code.
+func TestSpentAndExpiredCodesAreExplained(t *testing.T) {
+	h := newHarnessMode(t, testGame(), false)
+	ctx := context.Background()
+
+	spent, _ := store.NewInviteToken()
+	invite, err := h.store.CreateInvite(ctx, spent, 1, time.Time{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.RevokeInvite(ctx, invite.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	expired, _ := store.NewInviteToken()
+	if _, err := h.store.CreateInvite(ctx, expired, 1, time.Now().Add(-time.Hour), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if out := h.enrollDialog(t, newSigner(t), spent, spent, spent); !strings.Contains(out, "already been used") {
+		t.Errorf("a spent code was not explained:\n%s", out)
+	}
+	if out := h.enrollDialog(t, newSigner(t), expired, expired, expired); !strings.Contains(out, "has expired") {
+		t.Errorf("an expired code was not explained:\n%s", out)
+	}
+}
+
+// An open server asks for no code at all.
+func TestOpenEnrolmentAsksForNoInvitation(t *testing.T) {
+	h := newHarnessMode(t, testGame(), true)
+	out := h.enrollDialog(t, newSigner(t), "rook")
+
+	if strings.Contains(out, "invitation") {
+		t.Fatalf("an open server asked for an invitation:\n%s", out)
+	}
+	if extractPassword(t, out) == "" {
+		t.Fatalf("an open server did not enrol anybody:\n%s", out)
+	}
+}
+
+// The limit is counted before anything is asked, so a script working through
+// invitation codes is stopped by the same bound as one creating players.
+func TestEnrolmentIsRateLimited(t *testing.T) {
+	h := newHarnessMode(t, testGame(), true)
+	h.srv.limiter = newEnrollLimiter(2, time.Hour)
+
+	for i := 0; i < 2; i++ {
+		out := h.enrollDialog(t, newSigner(t), fmt.Sprintf("player%d", i))
+		if extractPassword(t, out) == "" {
+			t.Fatalf("attempt %d was refused inside the limit:\n%s", i+1, out)
+		}
+	}
+
+	out := h.enrollDialog(t, newSigner(t), "onetoomany")
+	if !strings.Contains(out, "too many enrolment attempts") {
+		t.Fatalf("the third attempt was not limited:\n%s", out)
+	}
+	if extractPassword(t, out) != "" {
+		t.Fatal("a limited attempt still enrolled somebody")
 	}
 }

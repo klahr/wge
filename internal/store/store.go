@@ -59,6 +59,27 @@ CREATE TABLE IF NOT EXISTS runs (
 	UNIQUE (player_id, game_id)
 );
 
+-- Permission to become a player. The token itself is never stored: a copy of
+-- this database must not be a stack of usable invitations.
+CREATE TABLE IF NOT EXISTS invites (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	hash       TEXT    NOT NULL UNIQUE,
+	note       TEXT    NOT NULL DEFAULT '',
+	uses       INTEGER NOT NULL,
+	uses_left  INTEGER NOT NULL,
+	expires_at INTEGER,
+	created_at INTEGER NOT NULL
+);
+
+-- Who spent which invitation. Kept when an invitation is revoked, because the
+-- record of who came in on it is the reason to keep it.
+CREATE TABLE IF NOT EXISTS invite_redemptions (
+	invite_id   INTEGER NOT NULL REFERENCES invites(id) ON DELETE CASCADE,
+	player_id   INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+	redeemed_at INTEGER NOT NULL,
+	PRIMARY KEY (invite_id, player_id)
+);
+
 CREATE TABLE IF NOT EXISTS progress (
 	run_id           INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
 	level_id         TEXT    NOT NULL,
@@ -103,6 +124,19 @@ func (s *Store) CreatePlayer(ctx context.Context, handle, fingerprint string) (*
 	}
 	defer tx.Rollback()
 
+	player, err := createPlayerTx(ctx, tx, handle, fingerprint, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return player, nil
+}
+
+// createPlayerTx registers a player inside an existing transaction, so that
+// redeeming an invitation and creating the player it admits are one operation.
+func createPlayerTx(ctx context.Context, tx *sql.Tx, handle, fingerprint string, now time.Time) (*Player, error) {
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO players (handle, created_at) VALUES (?, ?)`, handle, now.Unix())
 	if err != nil {
@@ -116,9 +150,6 @@ func (s *Store) CreatePlayer(ctx context.Context, handle, fingerprint string) (*
 		`INSERT INTO player_keys (fingerprint, player_id, added_at) VALUES (?, ?, ?)`,
 		fingerprint, id, now.Unix()); err != nil {
 		return nil, fmt.Errorf("register key: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	return &Player{ID: id, Handle: handle, CreatedAt: now}, nil
 }

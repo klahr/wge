@@ -95,12 +95,23 @@ type Config struct {
 
 	// AuthTimeout bounds how long a connection may sit unauthenticated.
 	AuthTimeout time.Duration
+
+	// OpenEnrollment lets anybody who can reach the port become a player.
+	// Without it an invitation is required, which is the safe default: a
+	// server nobody has to be invited to is a server anybody can fill.
+	OpenEnrollment bool
+
+	// EnrollLimit is how many enrolment attempts one address may make in
+	// EnrollWindow. Zero takes the default; negative removes the limit.
+	EnrollLimit  int
+	EnrollWindow time.Duration
 }
 
 // Server is the SSH front door.
 type Server struct {
-	cfg Config
-	log *slog.Logger
+	cfg     Config
+	log     *slog.Logger
+	limiter *enrollLimiter
 
 	listener net.Listener
 	wg       sync.WaitGroup
@@ -123,7 +134,11 @@ func New(cfg Config) (*Server, error) {
 	if cfg.AuthTimeout == 0 {
 		cfg.AuthTimeout = 30 * time.Second
 	}
-	return &Server{cfg: cfg, log: cfg.Logger}, nil
+	return &Server{
+		cfg:     cfg,
+		log:     cfg.Logger,
+		limiter: newEnrollLimiter(cfg.EnrollLimit, cfg.EnrollWindow),
+	}, nil
 }
 
 // Listen binds the broker's address without serving, so callers (and tests)

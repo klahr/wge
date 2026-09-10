@@ -247,23 +247,26 @@ wge base     <base-dir>    build a base image games are built on
 wge build    <game-dir>    compile a game into a container image
 wge test     <game-dir>    verify a built image enforces its level graph
 wge serve                  run the SSH front door
+wge invite                 create, list or revoke an invitation to enrol
 wge reset <handle> <game>  start a player's game over with new credentials
 ```
 
-`serve` takes `-grace` (how long a container outlives its last session, default
-15m), `-sweep` (how often abandoned containers are collected, default 5m) and
-`-node` (this machine's name in the runs table).
+`serve` takes `-open` (enrol without an invitation), `-max-machines`,
+`-enroll-limit`, `-grace` (how long a container outlives its last session,
+default 15m), `-sweep` (how often abandoned containers are collected, default
+5m) and `-node` (this machine's name in the runs table).
 
 To play the example game:
 
 ```
-wge base bases/debian-13
-wge build games/heist
-wge test games/heist
-wge serve
+wge base bases/debian-13          # the image games are built on
+wge build games/demo              # compile the game
+wge test  games/demo              # prove the built image enforces its graph
+wge invite                        # print an invitation code
+wge serve                         # or: wge serve -open
 
-ssh enroll@localhost -p 2222      # register, and collect the first password
-ssh heist@localhost -p 2222       # play
+ssh enroll@localhost -p 2222      # redeem the code, collect the first password
+ssh demo@localhost -p 2222        # play
 ```
 
 ## Multi-host runs
@@ -349,6 +352,43 @@ salt is re-rolled: a box still carrying the old credentials would leave the
 player with a game whose answers depend on which of the two they reached. And
 a reset takes the scratch volume that a reap deliberately keeps, because notes
 written against the old credentials are the old answers.
+
+## Getting in
+
+Enrolment is **closed by default**. A server nobody has to be invited to is a
+server anybody can fill, and admission control does not help: a script creating
+players is using the node exactly as intended, just faster than anyone wanted.
+
+```
+wge invite -uses 30 -expires 7d -note "workshop"
+CXXK-2V55-R3FH-XBGV
+```
+
+The code is read off a screen and typed by hand, so it leaves out the
+characters people confuse — no I, L, O, U, 0 or 1 — and is grouped in fours.
+Thirty symbols over sixteen places is a little over 78 bits, which is not
+guessable at any rate a network will carry. Only its hash is stored: a copy of
+the database is not a stack of usable invitations, and a code that has been
+lost is replaced rather than recovered.
+
+Redeeming spends a use and creates the player in **one transaction**. Splitting
+them would leave either a player who never used an invitation, or an invitation
+spent on a player who was never created — and the second costs somebody their
+place. The use is spent under a condition in the statement, so two people
+racing for the last place on a workshop code cannot both have it.
+
+A player is told *why* a code failed: unknown, spent or expired. A code is not
+a secret its holder needs protecting from, and somebody hunting a typo that is
+not there gives up on the game rather than on the code.
+
+`wge invite -list` shows what is outstanding and `-revoke` spends the rest of
+an invitation's uses without deleting it, so the record of who came in on it
+survives. `serve -open` drops the requirement entirely.
+
+Either way, enrolment attempts are rate limited per address — 60 an hour by
+default, which is generous because a workshop of thirty behind one office
+address is the normal case and a limit that turns them away is worse than the
+abuse it prevents. What it stops is the unbounded case.
 
 ## Admission control
 

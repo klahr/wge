@@ -118,6 +118,18 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&text); err != nil {
 		return err
 	}
+
+	parsed, err := ParseDuration(text)
+	if err != nil {
+		return err
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// ParseDuration reads a duration, understanding days and weeks as well as
+// everything Go's own parser takes.
+func ParseDuration(text string) (time.Duration, error) {
 	text = strings.TrimSpace(text)
 
 	unit := time.Duration(0)
@@ -131,18 +143,16 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	if unit != 0 {
 		var count float64
 		if _, err := fmt.Sscanf(strings.TrimRight(text, "dw"), "%g", &count); err != nil {
-			return fmt.Errorf("parse duration %q: %w", text, err)
+			return 0, fmt.Errorf("parse duration %q: %w", text, err)
 		}
-		*d = Duration(time.Duration(count * float64(unit)))
-		return nil
+		return time.Duration(count * float64(unit)), nil
 	}
 
 	parsed, err := time.ParseDuration(text)
 	if err != nil {
-		return fmt.Errorf("parse duration %q: %w", text, err)
+		return 0, fmt.Errorf("parse duration %q: %w", text, err)
 	}
-	*d = Duration(parsed)
-	return nil
+	return parsed, nil
 }
 
 // Anchored reports whether the timeline is pinned to a fixed date rather than

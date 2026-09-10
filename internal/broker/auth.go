@@ -44,6 +44,7 @@ const (
 type outcome struct {
 	kind        outcomeKind
 	fingerprint string
+	remote      string
 	player      *store.Player // nil for a player who has never connected
 	game        *manifest.Game
 	run         *store.Run // nil until a run exists
@@ -148,7 +149,10 @@ func (a *authenticator) keyVerified(
 	// The enrollment entrance takes anyone: a key nobody has seen belongs to
 	// somebody new, and a key we know belongs to a player starting another game.
 	if requested == EnrollUser {
-		a.set(&outcome{kind: outcomeEnroll, fingerprint: fingerprint, player: player})
+		a.set(&outcome{
+			kind: outcomeEnroll, fingerprint: fingerprint,
+			player: player, remote: conn.RemoteAddr().String(),
+		})
 		return perms, nil
 	}
 
